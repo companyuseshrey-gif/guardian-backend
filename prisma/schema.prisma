@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// LOCAL DEPLOYMENT uses sqlite (zero external dependencies).
+// PRODUCTION: change provider to "postgresql" and point DATABASE_URL at Postgres.
+// No other code changes are needed — the queries are provider-agnostic.
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A monitored device, paired to a guardian account during enrollment.
+model Device {
+  id              String           @id            // matches the client's deviceId
+  enrollmentToken String           @unique        // bearer token the device authenticates with
+  label           String?                         // e.g. "Child's phone"
+  createdAt       DateTime         @default(now())
+  lastSeenAt      DateTime?                       // updated on every heartbeat/ingest — drives online status
+  events          Event[]
+  mediaItems      MediaItem[]
+  screenshots     Screenshot[]
+  chatMessages    ChatMessage[]
+  callLogs        CallLog[]
+  callRecordings  CallRecording[]
+  smsMessages     SmsMessage[]
+}
+
+/// One captured message. `clientEventId` is unique so retried uploads are idempotent.
+model Event {
+  id                String   @id @default(cuid())
+  clientEventId     String   @unique
+  device            Device   @relation(fields: [deviceId], references: [id])
+  deviceId          String
+  packageName       String
+  appLabel          String
+  conversationTitle String?
+  sender            String?
+  text              String
+  isGroup           Boolean
+  postedAt          BigInt                 // epoch ms from the source notification
+  capturedAt        BigInt                 // epoch ms when the device observed it
+  receivedAt        DateTime @default(now())
+
+  @@index([deviceId, receivedAt])
+}
+
+/// One synchronized photo/video/document the user explicitly authorized (via the system Photo
+/// Picker or a Storage Access Framework folder grant) for backup to this device's guardian
+/// account. `clientItemId` is stable per source file, so re-syncing the same file after it
+/// changes updates this row in place rather than creating a duplicate.
+model MediaItem {
+  id               String    @id @default(cuid())
+  clientItemId     String    @unique
+  device           Device    @relation(fields: [deviceId], references: [id])
+  deviceId         String
+  mediaType        String                  // "image" | "video" | "audio" | "document"
+  uri              String                  // content:// URI the user granted access to
+  displayName      String?
+  mimeType         String?
+  sizeBytes        BigInt?                 // size reported by the device at negotiate time
+  dateAddedMs      BigInt?
+  dateModifiedMs   BigInt?
+  width            Int?
+  height           Int?
+  durationMs       BigInt?
+  thumbnailBase64  String?                 // small, optional — omitted whenever unavailable
+  contentHash      String?                 // sha256 of the uploaded bytes — dedup/change signal
+  syncStatus       String    @default("pending") // "pending" | "uploaded"
+  storedPath       String?                 // path under MEDIA_STORE_DIR once content is stored
+  contentSizeBytes BigInt?                 // actual bytes received (should equal sizeBytes)
+  syncedAt         DateTime?               // when content upload completed
+  capturedAt       BigInt                  // when the device queued this item (epoch ms)
+  receivedAt       DateTime  @default(now())
+  folderCategory   String?                 // canonical category: Camera, Screenshots, Downloads, WhatsApp Images, etc.
+  relativePath     String?                 // RELATIVE_PATH from MediaStore, e.g. "DCIM/Camera/"
+
+  @@index([deviceId, receivedAt])
+}
+
+/// A screen capture taken while the user has an active, authorized MediaProjection session.
+model Screenshot {
+  id          String   @id @default(cuid())
+  device      Device   @relation(fields: [deviceId], references: [id])
+  deviceId    String
+  filename    String   @unique
+  sizeBytes   Int
+  width       Int
+  height      Int
+  storedPath  String
+  capturedAt  BigInt
+  receivedAt  DateTime @default(now())
+
+  @@index([deviceId, capturedAt])
+}
+
+/// A call-log entry read from the device's CallLog content provider.
+/// `clientCallId` is unique so re-syncing the same entry is idempotent.
+model CallLog {
+  id            String   @id @default(cuid())
+  clientCallId  String   @unique
+  device        Device   @relation(fields: [deviceId], references: [id])
+  deviceId      String
+  phoneNumber   String
+  contactName   String?
+  callType      String                 // "incoming" | "outgoing" | "missed" | "rejected" | "blocked"
+  duration      Int                    // seconds
+  callAt        BigInt                 // epoch ms
+  receivedAt    DateTime @default(now())
+
+  @@index([deviceId, callAt])
+}
+
+/// A call recording uploaded from the device. Linked to a CallLog entry when available.
+model CallRecording {
+  id            String   @id @default(cuid())
+  clientRecId   String   @unique
+  device        Device   @relation(fields: [deviceId], references: [id])
+  deviceId      String
+  phoneNumber   String
+  contactName   String?
+  callType      String
+  duration      Int                    // seconds
+  sizeBytes     Int
+  storedPath    String
+  callAt        BigInt                 // epoch ms
+  receivedAt    DateTime @default(now())
+
+  @@index([deviceId, callAt])
+}
+
+/// An imported WhatsApp chat message from an authorized "Export Chat" action.
+/// `clientMessageId` is unique so re-importing the same export is idempotent.
+model ChatMessage {
+  id              String   @id @default(cuid())
+  clientMessageId String   @unique
+  device          Device   @relation(fields: [deviceId], references: [id])
+  deviceId        String
+  chatName        String
+  sender          String
+  text            String
+  messageAt       BigInt
+  importedAt      DateTime @default(now())
+
+  @@index([deviceId, messageAt])
+}
+
+/// An SMS message read from the device Telephony.Sms content provider.
+/// `clientSmsId` is unique so re-syncing is idempotent.
+model SmsMessage {
+  id           String   @id @default(cuid())
+  clientSmsId  String   @unique
+  device       Device   @relation(fields: [deviceId], references: [id])
+  deviceId     String
+  address      String?
+  body         String
+  date         BigInt
+  type         String
+  receivedAt   DateTime @default(now())
+
+  @@index([deviceId, date])
+}
