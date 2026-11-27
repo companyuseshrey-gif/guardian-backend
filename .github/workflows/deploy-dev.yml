@@ -1,0 +1,35 @@
+name: Deploy Backend to WSL (Development)
+
+on:
+  push:
+    branches: [Development]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, guardian-backend]
+    env:
+      RUNNER_ALLOW_RUNASROOT: "1"
+    steps:
+      - name: Pull latest code
+        run: |
+          cd /home/administrator/guardian-backend
+          git fetch origin
+          git checkout Development
+          git pull origin Development
+
+      - name: Install dependencies
+        run: |
+          cd /home/administrator/guardian-backend
+          npm ci
+
+      - name: Build TypeScript
+        run: |
+          cd /home/administrator/guardian-backend
+          npm run build
+
+      - name: Restart backend
+        run: |
+          pm2 restart guardian-backend
+          sleep 3
+          pm2 describe guardian-backend | grep status
