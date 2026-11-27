@@ -24,6 +24,7 @@ model Device {
   callLogs        CallLog[]
   callRecordings  CallRecording[]
   smsMessages     SmsMessage[]
+  contacts        Contact[]
 }
 
 /// One captured message. `clientEventId` is unique so retried uploads are idempotent.
@@ -162,4 +163,19 @@ model SmsMessage {
   receivedAt   DateTime @default(now())
 
   @@index([deviceId, date])
+}
+
+/// A device contact read from ContactsContract.
+/// clientContactId is stable so re-syncing is idempotent.
+model Contact {
+  id              String   @id @default(cuid())
+  clientContactId String   @unique
+  device          Device   @relation(fields: [deviceId], references: [id])
+  deviceId        String
+  displayName     String?
+  phoneNumber     String?
+  email           String?
+  receivedAt      DateTime @default(now())
+
+  @@index([deviceId, receivedAt])
 }
