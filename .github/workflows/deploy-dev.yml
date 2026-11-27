@@ -23,6 +23,11 @@ jobs:
           cd /home/administrator/guardian-backend
           npm ci
 
+      - name: Run database migrations
+        run: |
+          cd /home/administrator/guardian-backend
+          npx prisma migrate deploy
+
       - name: Build TypeScript
         run: |
           cd /home/administrator/guardian-backend
