@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Guardian - WhatsApp Messages</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;height:100vh;display:flex;flex-direction:column}
+header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-shrink:0}
+header svg{flex-shrink:0}
+header h1{font-size:16px;font-weight:600;color:#f1f5f9}
+header a{color:#64748b;font-size:13px;text-decoration:none;margin-left:auto}
+header a:hover{color:#94a3b8}
+.layout{display:flex;flex:1;overflow:hidden}
+.sidebar{width:240px;background:#1e293b;border-right:1px solid #334155;overflow-y:auto;flex-shrink:0}
+.sidebar-title{padding:12px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#64748b;border-bottom:1px solid #334155}
+.device-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #0f172a;transition:background .15s}
+.device-item:hover{background:#273449}
+.device-item.active{background:#1d3a5e;border-left:3px solid #22c55e}
+.device-label{font-size:13px;font-weight:500;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.device-meta{font-size:11px;color:#64748b;margin-top:2px}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.toolbar{padding:10px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap}
+.toolbar input{flex:1;min-width:120px;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 10px;color:#e2e8f0;font-size:12px;outline:none}
+.toolbar input::placeholder{color:#475569}
+.toolbar input:focus{border-color:#3b82f6}
+.toolbar select{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 10px;color:#e2e8f0;font-size:12px;outline:none;cursor:pointer;min-width:120px}
+.toolbar select option{background:#0f172a}
+.ticker{font-size:11px;color:#475569;margin-left:auto;white-space:nowrap}
+.msgs{flex:1;overflow-y:auto;padding:16px}
+.msg-card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 14px;margin-bottom:8px}
+.msg-card.outgoing{border-left:2px solid #3b82f6}
+.msg-header{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+.msg-chat{font-size:12px;font-weight:600;color:#22c55e}
+.msg-sender{font-size:12px;color:#94a3b8}
+.msg-card.outgoing .msg-sender{color:#60a5fa}
+.msg-time{font-size:11px;color:#475569;margin-left:auto}
+.msg-body{font-size:14px;color:#e2e8f0;line-height:1.5;word-break:break-word}
+.hint{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:#475569;gap:8px;padding:40px;text-align:center;line-height:1.8}
+.loading{color:#64748b;font-size:13px;padding:20px 16px}
+</style>
+</head>
+<body>
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+  <h1>Guardian &#x2013; WhatsApp Messages</h1>
+  <a href="/">&#x2190; Dashboard</a>
+</header>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-title">Devices</div>
+    <div id="device-list"><div class="loading">Loading&#x2026;</div></div>
+  </div>
+  <div class="main">
+    <div id="no-device" class="hint">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span style="font-size:14px">Select a device to view WhatsApp messages</span>
+      <span style="font-size:12px;color:#334155">Messages are captured via Accessibility Service when WhatsApp is open on the device</span>
+    </div>
+    <div id="chat-panel" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+      <div class="toolbar">
+        <input id="search" type="text" placeholder="Search messages&#x2026;" oninput="debounce()"/>
+        <select id="conv-filter" onchange="load()"><option value="">All conversations</option></select>
+        <span class="ticker" id="ticker"></span>
+      </div>
+      <div id="msgs" class="msgs"></div>
+    </div>
+  </div>
+</div>
+<script>
+var cur=null,searchTimer=null,pollTimer=null;
+
+function api(url,cb){
+  fetch(url,{credentials:'include'}).then(function(r){
+    if(r.status===401||r.status===403){window.location.href='/';return;}
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(cb).catch(function(e){console.warn(e.message);});
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function ts(ms){
+  var n=Number(ms);if(!n)return'';
+  var d=new Date(n);if(isNaN(d))return'';
+  return d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+
+function loadDevices(){
+  api('/api/devices',function(devices){
+    var el=document.getElementById('device-list');
+    if(!devices||!devices.length){el.innerHTML='<div class="loading">No devices enrolled</div>';return;}
+    el.innerHTML=devices.map(function(d){
+      return '<div class="device-item" data-id="'+esc(d.id)+'" onclick="sel(\''+esc(d.id)+'\',this)">'+
+        '<div class="device-label">'+esc(d.label||d.id.slice(0,12)+'&#x2026;')+'</div>'+
+        '<div class="device-meta">WhatsApp msgs: '+(d.chatMessageCount||0)+'</div></div>';
+    }).join('');
+  });
+}
+
+function sel(id,el){
+  document.querySelectorAll('.device-item').forEach(function(x){x.classList.remove('active');});
+  el.classList.add('active');
+  cur=id;
+  document.getElementById('no-device').style.display='none';
+  var cp=document.getElementById('chat-panel');cp.style.display='flex';
+  document.getElementById('conv-filter').innerHTML='<option value="">All conversations</option>';
+  document.getElementById('search').value='';
+  loadConversations();
+  load();
+  clearInterval(pollTimer);
+  pollTimer=setInterval(function(){if(cur)load();},10000);
+}
+
+function loadConversations(){
+  if(!cur)return;
+  api('/api/devices/'+cur+'/chats/conversations',function(convs){
+    if(!convs)return;
+    var sel=document.getElementById('conv-filter');
+    var prev=sel.value;
+    sel.innerHTML='<option value="">All conversations</option>';
+    convs.forEach(function(c){
+      var o=document.createElement('option');
+      o.value=c.chatName||'';
+      o.textContent=esc(c.chatName||'Unknown')+' ('+c.count+')';
+      if(c.chatName===prev)o.selected=true;
+      sel.appendChild(o);
+    });
+  });
+}
+
+function load(){
+  if(!cur)return;
+  var q=document.getElementById('search').value.trim();
+  var chat=document.getElementById('conv-filter').value;
+  var params=[];
+  if(q)params.push('q='+encodeURIComponent(q));
+  if(chat)params.push('chat='+encodeURIComponent(chat));
+  var url='/api/devices/'+cur+'/chats'+(params.length?'?'+params.join('&'):'');
+  api(url,function(msgs){
+    var el=document.getElementById('msgs');
+    if(!msgs||!el)return;
+    var tick=document.getElementById('ticker');
+    if(tick)tick.textContent=msgs.length+' message'+(msgs.length!==1?'s':'')+' • '+new Date().toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    if(!msgs.length){
+      el.innerHTML='<div class="hint" style="flex:unset;padding:40px 16px"><span>No messages found</span></div>';
+      return;
+    }
+    var scrolledToBottom=el.scrollTop+el.clientHeight>=el.scrollHeight-40;
+    el.innerHTML=msgs.map(function(m){
+      var out=(m.sender==='Me');
+      return '<div class="msg-card'+(out?' outgoing':'')+'">'+
+        '<div class="msg-header">'+
+        '<span class="msg-chat">'+esc(m.chatName||'Unknown')+'</span>'+
+        '<span class="msg-sender">'+esc(out?'You':(m.sender||''))+'</span>'+
+        '<span class="msg-time">'+ts(m.messageAt)+'</span></div>'+
+        '<div class="msg-body">'+esc(m.text||'')+'</div></div>';
+    }).join('');
+    if(scrolledToBottom)el.scrollTop=el.scrollHeight;
+  });
+}
+
+function debounce(){clearTimeout(searchTimer);searchTimer=setTimeout(load,300);}
+loadDevices();
+</script>
+</body>
+</html>
+

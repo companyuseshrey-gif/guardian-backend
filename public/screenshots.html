@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Guardian – Screenshots</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;height:100vh;display:flex;flex-direction:column}
+header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-shrink:0}
+header h1{font-size:16px;font-weight:600;color:#f1f5f9}
+header a{color:#64748b;font-size:13px;text-decoration:none;margin-left:auto}
+header a:hover{color:#94a3b8}
+.layout{display:flex;flex:1;overflow:hidden}
+.sidebar{width:220px;background:#1e293b;border-right:1px solid #334155;overflow-y:auto;flex-shrink:0}
+.sidebar-title{padding:12px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#64748b;border-bottom:1px solid #334155}
+.device-item{padding:12px 16px;cursor:pointer;border-bottom:1px solid #0f172a;transition:background .15s}
+.device-item:hover{background:#273449}
+.device-item.active{background:#1d3a5e;border-left:3px solid #3b82f6}
+.device-label{font-size:13px;font-weight:500;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.device-meta{font-size:11px;color:#64748b;margin-top:2px}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.toolbar{padding:10px 16px;background:#1e293b;border-bottom:1px solid #334155;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.toolbar span{font-size:13px;color:#94a3b8}
+#refresh-btn{background:#1d3a5e;border:1px solid #334155;color:#93c5fd;font-size:12px;padding:5px 12px;border-radius:6px;cursor:pointer}
+#refresh-btn:hover{background:#1e40af}
+.grid{flex:1;overflow-y:auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-content:start}
+.ss-card{background:#1e293b;border:1px solid #334155;border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.ss-card:hover{border-color:#3b82f6}
+.ss-card img{width:100%;display:block;aspect-ratio:9/19.5;object-fit:cover;background:#0f172a}
+.ss-info{padding:8px 10px}
+.ss-time{font-size:11px;color:#64748b}
+.ss-dim{font-size:10px;color:#475569}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:#475569;gap:8px;padding:40px}
+.loading{color:#64748b;font-size:13px;padding:20px 16px}
+#no-device{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:#475569;gap:6px}
+#lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:1000;align-items:center;justify-content:center;flex-direction:column;gap:10px}
+#lb.open{display:flex}
+#lb img{max-width:90vw;max-height:85vh;border-radius:4px;object-fit:contain}
+#lb-meta{color:#94a3b8;font-size:13px}
+#lb-close{position:absolute;top:16px;right:20px;background:none;border:none;color:#94a3b8;font-size:24px;cursor:pointer;line-height:1}
+#lb-close:hover{color:#f1f5f9}
+</style>
+</head>
+<body>
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+  <h1>Guardian – Screenshots</h1>
+  <a href="/">&#x2190; Dashboard</a>
+</header>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-title">Devices</div>
+    <div id="device-list"><div class="loading">Loading&#x2026;</div></div>
+  </div>
+  <div class="main">
+    <div id="no-device">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      <span style="font-size:14px">Select a device to view screenshots</span>
+    </div>
+    <div id="ss-panel" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+      <div class="toolbar">
+        <span id="ss-count"></span>
+        <button id="refresh-btn" onclick="loadScreenshots()">&#x21BB; Refresh</button>
+      </div>
+      <div id="grid" class="grid"></div>
+    </div>
+  </div>
+</div>
+<div id="lb">
+  <button id="lb-close" onclick="closeLb()">&#xD7;</button>
+  <img id="lb-img" src="" alt="screenshot"/>
+  <div id="lb-meta"></div>
+</div>
+<script>
+let cur=null,timer=null;
+async function api(p){const r=await fetch(p,{credentials:'include'});if(r.status===401||r.status===403){location.href='/';return null;}if(!r.ok)throw new Error(await r.text());return r.json();}
+function ts(ms){if(!ms)return'';const d=new Date(Number(ms));return isNaN(d)?'':d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+async function loadDevices(){try{const devs=await api('/api/devices');if(!devs)return;const el=document.getElementById('device-list');if(!devs.length){el.innerHTML='<div class="loading">No devices</div>';return;}el.innerHTML=devs.map(d=>`<div class="device-item" onclick="sel('${d.id}',this)"><div class="device-label">${d.label||d.id.slice(0,12)+'&#x2026;'}</div><div class="device-meta">Screenshots</div></div>`).join('');}catch(e){document.getElementById('device-list').innerHTML=`<div class="loading" style="color:#f87171">${e.message}</div>`;}}
+function sel(id,el){document.querySelectorAll('.device-item').forEach(x=>x.classList.remove('active'));el.classList.add('active');cur=id;document.getElementById('no-device').style.display='none';document.getElementById('ss-panel').style.display='flex';loadScreenshots();clearInterval(timer);timer=setInterval(loadScreenshots,60000);}
+async function loadScreenshots(){if(!cur)return;const grid=document.getElementById('grid');grid.innerHTML='<div class="loading">Loading&#x2026;</div>';try{const items=await api(`/api/devices/${cur}/screenshots`);if(!items)return;document.getElementById('ss-count').textContent=`${items.length} screenshot${items.length!==1?'s':''}`;if(!items.length){grid.innerHTML=`<div class="empty" style="grid-column:1/-1"><span>No screenshots yet</span></div>`;return;}grid.innerHTML=items.map(s=>`<div class="ss-card" onclick="lb('${s.id}','${s.capturedAt}','${s.width}','${s.height}')"><img src="/api/devices/${cur}/screenshots/${s.id}/content" loading="lazy"/><div class="ss-info"><div class="ss-time">${ts(s.capturedAt)}</div><div class="ss-dim">${s.width}&#xD7;${s.height}</div></div></div>`).join('');}catch(e){grid.innerHTML=`<div class="empty" style="grid-column:1/-1;color:#f87171">${e.message}</div>`;}}
+function lb(id,ca,w,h){document.getElementById('lb-img').src=`/api/devices/${cur}/screenshots/${id}/content`;document.getElementById('lb-meta').textContent=`${ts(ca)}  &#xB7;  ${w}&#xD7;${h}`;document.getElementById('lb').classList.add('open');}
+function closeLb(){document.getElementById('lb').classList.remove('open');}
+document.getElementById('lb').addEventListener('click',e=>{if(e.target===e.currentTarget)closeLb();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeLb();});
+loadDevices();
+</script>
+</body>
+</html>
+

