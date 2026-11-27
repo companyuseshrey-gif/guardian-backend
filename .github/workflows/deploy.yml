@@ -60,4 +60,4 @@ jobs:
           sshpass -p "${{ secrets.PROD_PASSWORD }}" \
             ssh -p ${{ secrets.PROD_PORT }} \
             ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} \
-            'cd /opt/guardian && npm ci && npx prisma migrate deploy && npm ci --omit=dev && systemctl restart guardian && sleep 3 && systemctl is-active guardian && echo "Deploy successful"'
+            'cd /opt/guardian && npm ci && npx prisma migrate resolve --applied 20260901000000_add_media_folder_category 2>/dev/null || true && npx prisma migrate deploy && npm ci --omit=dev && systemctl restart guardian && sleep 3 && systemctl is-active guardian && echo "Deploy successful"'
