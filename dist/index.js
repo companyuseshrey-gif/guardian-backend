@@ -15,7 +15,7 @@ import { appUpdateRouter } from "./routes/appUpdate.js";
 import { createSessionToken, parseCookies, verifyPassword, verifySessionToken, issueWalletChallenge, consumeWalletChallenge, verifyWalletSignature } from "./auth.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APK_PATH = path.join(__dirname, "../public/guardian.apk");
-const DASHBOARD_DIST = path.join(__dirname, "../../dashboard/dist");
+const DASHBOARD_DIST = path.join(__dirname, "../public");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
