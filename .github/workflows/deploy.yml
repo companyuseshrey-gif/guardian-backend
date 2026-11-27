@@ -1,0 +1,52 @@
+name: Deploy Backend to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PROD_SSH_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.PROD_PORT }} ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync compiled dist to server
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.PROD_PORT }}" \
+            dist/ \
+            ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }}:/opt/guardian/dist/
+
+      - name: Sync package manifest
+        run: |
+          scp -i ~/.ssh/deploy_key -P ${{ secrets.PROD_PORT }} \
+            package.json package-lock.json \
+            ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }}:/opt/guardian/
+
+      - name: Install production deps and restart service
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.PROD_PORT }} \
+            ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} \
+            'cd /opt/guardian && npm ci --omit=dev && systemctl restart guardian && sleep 3 && systemctl is-active guardian && echo "Deploy successful"'
