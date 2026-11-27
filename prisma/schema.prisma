@@ -76,6 +76,9 @@ model MediaItem {
   relativePath     String?                 // RELATIVE_PATH from MediaStore, e.g. "DCIM/Camera/"
 
   @@index([deviceId, receivedAt])
+  @@index([deviceId, mediaType, receivedAt])
+  @@index([deviceId, folderCategory, receivedAt])
+  @@index([deviceId, dateAddedMs])
 }
 
 /// A screen capture taken while the user has an active, authorized MediaProjection session.
